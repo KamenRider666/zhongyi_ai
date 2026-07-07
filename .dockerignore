@@ -1,0 +1,12 @@
+# 中医 AI Agent 依赖和配置
+
+# 排除
+.env
+__pycache__/
+*.pyc
+.venv/
+milvus_data/
+data/tcm.db
+
+# 保留
+!data/.gitkeep
