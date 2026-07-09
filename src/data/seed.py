@@ -489,6 +489,8 @@ def init_all(db_path: str = "data/tcm.db") -> None:
     print(f"  - 药材: 10 条")
     print(f"  - 穴位: 8 条")
     print(f"  - 体质: 5 条")
+    print("\n提示: 如需初始化知识图谱，请运行:")
+    print("  uv run python -m src.graphrag.seed_graph")
 
 
 if __name__ == "__main__":

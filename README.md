@@ -1,6 +1,6 @@
 # 中医 AI Agent
 
-基于 **LangChain + 通义千问 + Milvus + SQLite** 的中医智能助手。
+基于 **LangChain + 通义千问 + Milvus + Neo4j + SQLite** 的中医智能助手。
 
 ## 技术栈
 
@@ -9,6 +9,7 @@
 | Agent 框架 | LangChain |
 | LLM | 通义千问 (qwen-plus) |
 | 向量数据库 | Milvus |
+| 图数据库 | Neo4j (知识图谱) |
 | 结构化数据 | SQLite |
 | API 框架 | FastAPI |
 | 部署 | Docker + uv |
@@ -25,8 +26,14 @@ zhongyi_ai/
 │   │   ├── embedding.py    # 文本向量化
 │   │   ├── milvus_store.py # Milvus 向量存储
 │   │   └── retriever.py    # 检索器
+│   ├── graphrag/       # GraphRAG 知识图谱 (新增)
+│   │   ├── graph_store.py  # Neo4j 图数据库
+│   │   ├── graph_builder.py # 知识图谱构建
+│   │   ├── retriever.py     # 图检索器
+│   │   └── seed_graph.py    # 图谱种子数据
 │   ├── tools/          # LangChain 工具
-│   │   └── tcm_tools.py    # 方剂/药材/穴位/体质查询
+│   │   ├── tcm_tools.py     # 方剂/药材/穴位/体质查询
+│   │   └── graphrag_tools.py # 知识图谱查询工具 (新增)
 │   ├── data/           # 数据层
 │   │   ├── database.py # SQLite 操作
 │   │   └── seed.py     # 种子数据
@@ -108,3 +115,4 @@ docker-compose up -d
 4. **穴位推荐** — 根据症状推荐合适穴位
 5. **体质辨识** — 九种体质判断和调理建议
 6. **RAG 增强** — 基于中医经典知识库的检索增强
+7. **知识图谱推理** — 通过 Neo4j 发现症状→方剂→药材等多跳关联路径 (新增)

@@ -26,6 +26,14 @@ echo ""
 echo "📦 初始化中医数据..."
 uv run python -m src.data.seed
 
+# 初始化知识图谱（可选）
+echo ""
+echo "🕸️ 初始化知识图谱（可选，需 Neo4j 运行）..."
+uv run python -m src.graphrag.seed_graph 2>/dev/null || {
+    echo "⚠️ Neo4j 未连接，知识图谱功能暂不可用"
+    echo "   请先启动 Neo4j: docker-compose up -d neo4j"
+}
+
 # 启动服务
 echo ""
 echo "🚀 启动中医 AI Agent 服务..."

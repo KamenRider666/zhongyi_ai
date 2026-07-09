@@ -23,6 +23,9 @@ data/tcm.db
 # Milvus
 milvus_data/
 
+# Neo4j
+neo4j_data/
+
 # OS
 .DS_Store
 Thumbs.db

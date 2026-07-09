@@ -1,7 +1,7 @@
 # 中医 AI Agent (zhongyi-ai) — 项目架构文档
 
-> **编写时间**: 2026-07-07  
-> **技术栈**: LangChain + 通义千问(Qwen) + Milvus + SQLite + FastAPI + Docker + uv
+> **编写时间**: 2026-07-09  
+> **技术栈**: LangChain + 通义千问(Qwen) + Milvus + Neo4j + SQLite + FastAPI + Docker + uv
 
 ---
 
@@ -30,8 +30,14 @@ zhongyi_ai/
 │   │   ├── embedding.py          #   sentence-transformers 向量化
 │   │   ├── milvus_store.py       #   Milvus 向量库连接与管理
 │   │   └── retriever.py          #   中医知识检索器
+│   ├── graphrag/                 # [GraphRAG 层] 知识图谱检索（新增）
+│   │   ├── graph_store.py        #   Neo4j 图数据库连接与操作
+│   │   ├── graph_builder.py      #   从结构化数据构建知识图谱
+│   │   ├── retriever.py          #   图检索器（治疗路径/实体关系）
+│   │   └── seed_graph.py         #   知识图谱种子数据初始化
 │   ├── tools/                    # [工具层] Agent 可调用的工具
-│   │   └── tcm_tools.py          #   方剂/药材/穴位/体质 4 个查询工具
+│   │   ├── tcm_tools.py          #   方剂/药材/穴位/体质 4 个查询工具
+│   │   └── graphrag_tools.py     #   知识图谱查询工具（新增）
 │   ├── data/                     # [数据层] SQLite 结构化存储
 │   │   ├── database.py           #   SQLite 数据库 CRUD 操作
 │   │   └── seed.py               #   种子数据初始化脚本
@@ -43,7 +49,7 @@ zhongyi_ai/
 │   ├── start.bat                 #   Windows 启动
 │   └── start.sh                  #   Linux/macOS 启动
 ├── Dockerfile                    # Docker 镜像构建 (uv 多阶段构建)
-├── docker-compose.yml            # 容器编排 (Milvus + Agent)
+├── docker-compose.yml            # 容器编排 (Milvus + Neo4j + Agent)
 ├── pyproject.toml                # 项目元数据与依赖声明
 ├── .env / .env.example           # 环境变量配置
 └── .gitignore                    # Git 忽略规则
@@ -284,9 +290,60 @@ src/rag/retriever.py → TCMRetriever.retrieve(query)
 
 ---
 
-### 5.4 工具层 — `src/tools/tcm_tools.py`
+### 5.4 GraphRAG 层 — `src/graphrag/` (新增)
+
+知识图谱模块，基于 Neo4j 实现中医实体关系建模和多跳推理检索。
+
+#### 5.4.1 `src/graphrag/graph_store.py` — Neo4j 图数据库
+
+| 类/方法 | 说明 |
+|---------|------|
+| `Neo4jGraphStore` | Neo4j 图数据库封装 |
+| `connect()` | 建立 Neo4j 连接 (`bolt://localhost:7687`) |
+| `close()` | 关闭连接 |
+| `execute_query(query, parameters)` | 执行 Cypher 查询，返回结果列表 |
+| `execute_write(query, parameters)` | 执行 Cypher 写操作 |
+| `clear_graph()` | 清空知识图谱 |
+| `get_stats()` | 获取节点数和关系数统计 |
+| `create_constraints()` | 创建唯一性约束（确保节点不重复） |
+
+**知识图谱节点类型**：Formula(方剂)、Herb(药材)、Acupoint(穴位)、Constitution(体质)、Symptom(症状)、Meridian(经络)、Category(分类)、Book(出处)、Nature(药性)
+
+**关系类型**：CONTAINS(包含)、TREATS(治疗)、BELONGS_TO(属于)、SOURCE_FROM(出自)、ENTERS_MERIDIAN(归经)、HAS_NATURE(有药性)、HAS_SYMPTOM(有症状)、RECOMMENDS_ACUPOINT(推荐穴位)
+
+#### 5.4.2 `src/graphrag/graph_builder.py` — 知识图谱构建器
+
+| 类/方法 | 说明 |
+|---------|------|
+| `TCMGraphBuilder` | 从 SQLite 结构化数据构建知识图谱 |
+| `build_full_graph()` | **核心方法**：构建完整知识图谱（创建所有节点和关系） |
+| `_extract_symptoms(text)` | 从主治文本中提取症状关键词 |
+| `_extract_herbs_from_composition(composition)` | 从方剂组成文本中提取药材名 |
+
+#### 5.4.3 `src/graphrag/retriever.py` — 图检索器
+
+| 类/方法 | 说明 |
+|---------|------|
+| `GraphRetriever` | 知识图谱检索器 |
+| `search_entities(keyword, entity_type)` | 搜索实体节点 |
+| `get_entity_relations(entity_name, depth)` | 获取实体的关联关系（1度/2度） |
+| `find_treatment_path(symptom)` | **核心方法**：根据症状发现治疗路径（症状→方剂/药材/穴位/体质） |
+| `find_related_entities(entity_name, relation_type)` | 查找关联实体 |
+| `format_context(paths)` | 将检索路径格式化为 LLM 可用的上下文文本 |
+
+#### 5.4.4 `src/graphrag/seed_graph.py` — 知识图谱种子数据
+
+| 内容 | 说明 |
+|------|------|
+| `init_graph_data()` | 连接 Neo4j → 从 SQLite 加载数据 → 构建知识图谱 → 输出统计 |
+
+---
+
+### 5.5 工具层
 
 所有工具均使用 `@tool` 装饰器注册为 LangChain Tool，Agent 可自动调用。
+
+#### 5.5.1 `src/tools/tcm_tools.py` — 结构化数据查询工具
 
 | 工具函数 | 参数 | 说明 |
 |---------|------|------|
@@ -297,11 +354,21 @@ src/rag/retriever.py → TCMRetriever.retrieve(query)
 
 所有工具内部调用 `src/data/database.py` 中的 `TCMDatabase` 类进行 SQLite 查询。
 
+#### 5.5.2 `src/tools/graphrag_tools.py` — 知识图谱查询工具 (新增)
+
+| 工具函数 | 参数 | 说明 |
+|---------|------|------|
+| `SymptomPathTool` (`search_symptom_path`) | `symptom` (必填, 症状关键词) | **GraphRAG 核心工具**：根据症状在知识图谱中查找治疗路径（症状→方剂、症状→药材、症状→穴位、症状→体质、症状→方剂→药材二度路径） |
+| `GraphEntitySearchTool` (`search_graph_entity`) | `keyword` (必填), `entity_type` (可选) | 在知识图谱中搜索中医实体节点 |
+| `GraphRelationTool` (`search_graph_relation`) | `entity_name` (必填), `depth` (可选, 1或2) | 查询实体的关联关系（支持二度关系） |
+
+所有图谱工具内部调用 `src/graphrag/retriever.py` 中的 `GraphRetriever` 类进行 Neo4j 查询。
+
 ---
 
-### 5.5 数据层
+### 5.6 数据层
 
-#### 5.5.1 `src/data/database.py` — SQLite 数据库
+#### 5.6.1 `src/data/database.py` — SQLite 数据库
 
 | 类/方法 | 说明 |
 |---------|------|
@@ -378,9 +445,10 @@ src/rag/retriever.py → TCMRetriever.retrieve(query)
 | `etcd` | `quay.io/coreos/etcd:v3.5.5` | 2379-2380 | Milvus 元数据存储 |
 | `minio` | `minio/minio:latest` | 9000-9001 | Milvus 对象存储 |
 | `milvus` | `milvusdb/milvus:v2.4.0` | 19530, 9091 | 向量数据库 |
+| `neo4j` | `neo4j:5.26.0` | 7474, 7687 | 图数据库 |
 | `agent` | 本地构建 | 8000 | 中医 AI Agent 服务 |
 
-依赖链：`agent` 依赖 `milvus`，`milvus` 依赖 `etcd` + `minio`。
+依赖链：`agent` 依赖 `milvus` + `neo4j`，`milvus` 依赖 `etcd` + `minio`。
 
 ---
 
@@ -423,11 +491,12 @@ src/rag/retriever.py → TCMRetriever.retrieve(query)
 | Agent 框架 | LangChain | 成熟的工具调用链、丰富的集成生态 |
 | LLM | 通义千问 (qwen-plus) | 中文能力强、DashScope API 稳定、性价比高 |
 | 向量数据库 | Milvus | 生产级、支持十亿级向量、Docker 部署方便 |
+| 图数据库 | Neo4j | 知识图谱标准工具、Cypher 查询语言灵活、Docker 部署方便 |
 | 结构化数据 | SQLite | 轻量零配置、方剂/药材数据量不大、单文件便于备份 |
 | 嵌入模型 | BAAI/bge-small-zh-v1.5 | 中文优化、384维小而快、开源免费 |
 | Web 框架 | FastAPI | 异步高性能、自动生成 API 文档、类型安全 |
 | 包管理 | uv | 极速安装、锁文件保证可复现、Docker 友好 |
-| 部署 | Docker + docker-compose | 一键启动 Milvus + Agent、环境隔离 |
+| 部署 | Docker + docker-compose | 一键启动 Milvus + Neo4j + Agent、环境隔离 |
 
 ---
 
@@ -449,7 +518,11 @@ uv sync
 # 4. 初始化数据
 uv run python -m src.data.seed
 
-# 5. 启动服务
+# 5. 初始化知识图谱（需先启动 Neo4j）
+docker-compose up -d neo4j
+uv run python -m src.graphrag.seed_graph
+
+# 6. 启动服务
 uv run python -m src.api.server
 ```
 
@@ -465,6 +538,13 @@ uv run python -m src.api.server
 1. 在 `src/data/seed.py` 中添加新的知识文本
 2. 运行 `uv run python -m src.data.seed` 重新入库
 3. 文本会被向量化并存入 Milvus
+
+### 添加新知识到知识图谱
+
+1. 在 `src/data/seed.py` 中添加新的方剂/药材/穴位/体质数据
+2. 运行 `uv run python -m src.data.seed` 更新 SQLite
+3. 运行 `uv run python -m src.graphrag.seed_graph` 重建知识图谱
+4. 新的实体和关系会自动从 SQLite 数据提取并写入 Neo4j
 
 ### 调整模型
 

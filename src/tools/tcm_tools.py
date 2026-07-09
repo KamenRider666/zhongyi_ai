@@ -6,6 +6,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from src.data.database import TCMDatabase
+from src.tools.graphrag_tools import get_graphrag_tools
 
 
 # === 工具输入模型 ===
@@ -169,10 +170,10 @@ class ConstitutionTool(BaseTool):
 
 
 def get_all_tools() -> list:
-    """获取所有可用工具"""
+    """获取所有可用工具（含知识图谱工具）"""
     return [
         FangjiSearchTool(),
         HerbSearchTool(),
         AcupointSearchTool(),
         ConstitutionTool(),
-    ]
+    ] + get_graphrag_tools()
