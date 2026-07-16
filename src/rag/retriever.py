@@ -3,18 +3,21 @@
 from typing import List, Optional
 
 from src.rag.embedding import EmbeddingService
-from src.rag.milvus_store import MilvusStore
-
+# from src.rag.milvus_store import MilvusStore
+from src.rag.qdrant_store import QdrantStore
 
 class TCMRetriever:
     """中医知识检索器"""
 
     def __init__(
         self,
-        milvus_store: MilvusStore,
+        # milvus_store: MilvusStore,
+        vector_store: QdrantStore,
         embedding_service: EmbeddingService,
+
     ):
-        self.store = milvus_store
+        # self.store = milvus_store
+        self.store = vector_store
         self.embedding = embedding_service
 
     def retrieve(

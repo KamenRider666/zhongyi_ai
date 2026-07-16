@@ -4,21 +4,23 @@ from typing import Any, Dict, List, Optional
 
 from neo4j import GraphDatabase, Driver
 
+from src.config import settings
+
 
 class Neo4jGraphStore:
     """Neo4j 知识图谱存储封装"""
 
     def __init__(
         self,
-        uri: str = "bolt://localhost:7687",
-        user: str = "neo4j",
-        password: str = "zhongyi2024",
-        database: str = "tcm_graph",
+        uri: str | None = None,
+        user: str | None = None,
+        password: str | None = None,
+        database: str | None = None,
     ):
-        self.uri = uri
-        self.user = user
-        self.password = password
-        self.database = database
+        self.uri = uri or settings.NEO4J_URI
+        self.user = user or settings.NEO4J_USER
+        self.password = password or settings.NEO4J_PASSWORD
+        self.database = database or settings.NEO4J_DATABASE
         self._driver: Optional[Driver] = None
 
     def connect(self) -> None:
@@ -95,12 +97,11 @@ class Neo4jGraphStore:
         constraints = [
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:Formula) REQUIRE f.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (h:Herb) REQUIRE h.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (a:Acupoint) REQUIRE a.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Constitution) REQUIRE c.type IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (s:Symptom) REQUIRE s.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (d:Disease) REQUIRE d.code IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (s:Syndrome) REQUIRE s.code IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (sym:Symptom) REQUIRE sym.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (m:Meridian) REQUIRE m.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (cat:Category) REQUIRE cat.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (b:Book) REQUIRE b.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (nat:Nature) REQUIRE nat.name IS UNIQUE",
         ]
         for constraint in constraints:

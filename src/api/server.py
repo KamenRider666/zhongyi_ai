@@ -104,8 +104,9 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=503, detail="Agent 未初始化")
 
     try:
-        result = await agent_executor.ainvoke({"input": request.message})
-        reply = result.get("output", "抱歉，我暂时无法回答这个问题。")
+        result = await agent_executor.ainvoke({"messages": [{"role": "user", "content": request.message}]})
+        messages = result.get("messages", [])
+        reply = messages[-1].content if messages else "抱歉，我暂时无法回答这个问题。"
         return ChatResponse(reply=reply)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent 执行错误: {str(e)}")
@@ -119,8 +120,9 @@ async def chat_stream(request: ChatRequest):
 
     async def generate():
         try:
-            result = await agent_executor.ainvoke({"input": request.message})
-            reply = result.get("output", "抱歉，我暂时无法回答这个问题。")
+            result = await agent_executor.ainvoke({"messages": [{"role": "user", "content": request.message}]})
+            messages = result.get("messages", [])
+            reply = messages[-1].content if messages else "抱歉，我暂时无法回答这个问题。"
             yield f"data: {reply}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:

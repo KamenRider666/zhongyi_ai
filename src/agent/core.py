@@ -2,9 +2,10 @@
 
 from typing import Any, Dict, List
 
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
+from langgraph.graph.state import CompiledStateGraph
 
 from src.agent.llm import QwenChatModel
 
@@ -41,52 +42,41 @@ TCM_SYSTEM_PROMPT = """你是一位资深的中医 AI 助手，精通中医经�
 def create_tcm_agent(
     llm: QwenChatModel,
     tools: List[BaseTool],
-    verbose: bool = False,
-) -> AgentExecutor:
+    debug: bool = False,
+) -> CompiledStateGraph:
     """创建中医 AI Agent
 
     Args:
         llm: 通义千问 LLM 实例
         tools: 可用工具列表（方剂查询、药材查询等）
-        verbose: 是否输出详细日志
+        debug: 是否开启调试模式
 
     Returns:
-        AgentExecutor 实例
+        CompiledStateGraph 实例
     """
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", TCM_SYSTEM_PROMPT),
-            ("user", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ]
-    )
-
-    agent = create_openai_tools_agent(llm, tools, prompt)
-    agent_executor = AgentExecutor(
-        agent=agent,
+    agent = create_agent(
+        model=llm,
         tools=tools,
-        verbose=verbose,
-        handle_parsing_errors=True,
-        max_iterations=5,
+        system_prompt=TCM_SYSTEM_PROMPT,
+        debug=debug,
     )
-
-    return agent_executor
+    return agent
 
 
 async def run_agent(
-    agent_executor: AgentExecutor,
+    agent: CompiledStateGraph,
     user_input: str,
     chat_history: List[Dict[str, str]] | None = None,
 ) -> Dict[str, Any]:
     """运行 Agent 处理用户输入
 
     Args:
-        agent_executor: Agent 执行器
+        agent: CompiledStateGraph 实例
         user_input: 用户输入文本
         chat_history: 对话历史
 
     Returns:
-        Agent 执行结果
+        Agent 执行结果，包含 "messages" 键
     """
-    result = await agent_executor.ainvoke({"input": user_input})
+    result = await agent.ainvoke({"messages": [HumanMessage(content=user_input)]})
     return result
