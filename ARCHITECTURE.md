@@ -296,16 +296,16 @@ src/rag/retriever.py → TCMRetriever.retrieve(query)
 
 #### 5.4.1 `src/graphrag/graph_store.py` — Neo4j 图数据库
 
-| 类/方法 | 说明 |
-|---------|------|
-| `Neo4jGraphStore` | Neo4j 图数据库封装 |
+| 类/方法 | 说明                                    |
+|---------|---------------------------------------|
+| `Neo4jGraphStore` | Neo4j 图数据库封装                          |
 | `connect()` | 建立 Neo4j 连接 (`bolt://localhost:7687`) |
-| `close()` | 关闭连接 |
-| `execute_query(query, parameters)` | 执行 Cypher 查询，返回结果列表 |
-| `execute_write(query, parameters)` | 执行 Cypher 写操作 |
-| `clear_graph()` | 清空知识图谱 |
-| `get_stats()` | 获取节点数和关系数统计 |
-| `create_constraints()` | 创建唯一性约束（确保节点不重复） |
+| `close()` | 关闭连接                                  |
+| `execute_query(query, parameters)` | 执行 Cypher 查询，返回结果列表                   |
+| `execute_write(query, parameters)` | 执行 Cypher 写操作                         |
+| `clear_graph()` | 清空知识图谱                                |
+| `get_stats()` | 获取节点数和关系数统计                           |
+| `create_constraints()` | 创建唯一性约束（确保节点不重复）                      |
 
 **知识图谱节点类型**：Formula(方剂)、Herb(药材)、Acupoint(穴位)、Constitution(体质)、Symptom(症状)、Meridian(经络)、Category(分类)、Book(出处)、Nature(药性)
 
@@ -440,13 +440,13 @@ src/rag/retriever.py → TCMRetriever.retrieve(query)
 
 编排 4 个服务：
 
-| 服务 | 镜像 | 端口 | 说明 |
-|------|------|------|------|
-| `etcd` | `quay.io/coreos/etcd:v3.5.5` | 2379-2380 | Milvus 元数据存储 |
-| `minio` | `minio/minio:latest` | 9000-9001 | Milvus 对象存储 |
+| 服务 | 镜像 | 端口          | 说明 |
+|------|------|-------------|------|
+| `etcd` | `quay.io/coreos/etcd:v3.5.5` | 2379-2380   | Milvus 元数据存储 |
+| `minio` | `minio/minio:latest` | 9000-9001   | Milvus 对象存储 |
 | `milvus` | `milvusdb/milvus:v2.4.0` | 19530, 9091 | 向量数据库 |
-| `neo4j` | `neo4j:5.26.0` | 7474, 7687 | 图数据库 |
-| `agent` | 本地构建 | 8000 | 中医 AI Agent 服务 |
+| `neo4j` | `neo4j:5.26.0` | 7474, 7687  | 图数据库 |
+| `agent` | 本地构建 | 8000        | 中医 AI Agent 服务 |
 
 依赖链：`agent` 依赖 `milvus` + `neo4j`，`milvus` 依赖 `etcd` + `minio`。
 

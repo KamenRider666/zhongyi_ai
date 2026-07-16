@@ -23,6 +23,8 @@ dependencies = [
     "langgraph>=0.2.0",
     "tqdm>=4.66.0",
     "pymysql>=1.1.0",
+    "python-jose[cryptography]>=3.5.0",
+    "passlib[bcrypt]>=1.7.4",
 ]
 
 [project.optional-dependencies]
@@ -47,3 +49,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+asyncio_mode = "auto"
+markers = [
+    "asyncio: mark a test as an async test",
+]

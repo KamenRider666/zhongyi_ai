@@ -196,11 +196,11 @@ class TCMDatabase:
         cursor = conn.cursor()
         ph = self._ph
 
-        query = "SELECT * FROM fangji WHERE 1=1"
+        query = "SELECT * FROM formulas WHERE 1=1"
         params: List[Any] = []
 
         if keyword:
-            query += f" AND (name LIKE {ph} OR indications LIKE {ph} OR efficacy LIKE {ph})"
+            query += f" AND (name LIKE {ph} OR functions LIKE {ph} OR clinical_use LIKE {ph})"
             kw = f"%{keyword}%"
             params.extend([kw, kw, kw])
         if category:
@@ -220,7 +220,7 @@ class TCMDatabase:
         """根据名称获取方剂"""
         conn = self.get_conn()
         cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM fangji WHERE name LIKE {self._ph}", (f"%{name}%",))
+        cursor.execute(f"SELECT * FROM formulas WHERE name LIKE {self._ph}", (f"%{name}%",))
         row = cursor.fetchone()
         conn.close()
         return dict(row) if row else None
@@ -241,18 +241,18 @@ class TCMDatabase:
         cursor = conn.cursor()
         ph = self._ph
 
-        query = "SELECT * FROM herb WHERE 1=1"
+        query = "SELECT * FROM herbs WHERE 1=1"
         params: List[Any] = []
 
         if keyword:
-            query += f" AND (name LIKE {ph} OR efficacy LIKE {ph} OR indications LIKE {ph})"
+            query += f" AND (name LIKE {ph} OR functions LIKE {ph})"
             kw = f"%{keyword}%"
-            params.extend([kw, kw, kw])
+            params.extend([kw, kw])
         if nature:
-            query += f" AND nature LIKE {ph}"
+            query += f" AND nature_taste_meridian LIKE {ph}"
             params.append(f"%{nature}%")
         if meridian:
-            query += f" AND meridian LIKE {ph}"
+            query += f" AND nature_taste_meridian LIKE {ph}"
             params.append(f"%{meridian}%")
 
         query += f" LIMIT {ph}"
@@ -268,7 +268,7 @@ class TCMDatabase:
         """根据名称获取药材"""
         conn = self.get_conn()
         cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM herb WHERE name LIKE {self._ph}", (f"%{name}%",))
+        cursor.execute(f"SELECT * FROM herbs WHERE name LIKE {self._ph}", (f"%{name}%",))
         row = cursor.fetchone()
         conn.close()
         return dict(row) if row else None

@@ -70,6 +70,7 @@ class QdrantStore:
         sources: List[str],
         categories: List[str],
         id_start: int = 0,
+        metadata: Optional[List[dict]] = None,
     ) -> None:
         """插入向量数据
 
@@ -79,11 +80,15 @@ class QdrantStore:
             sources: 来源列表
             categories: 分类列表
             id_start: 起始 ID（多次调用时避免覆盖）
+            metadata: 可选的原始数据字典列表（如 JSONL 原始字段）
         """
         if self.client is None:
             self.connect()
         if not self.client.collection_exists(self.collection_name):
             self.create_collection()
+
+        if metadata is None:
+            metadata = [{}] * len(texts)
 
         points = [
             models.PointStruct(
@@ -93,10 +98,11 @@ class QdrantStore:
                     "content": text,
                     "source": src,
                     "category": cat,
+                    **meta,
                 },
             )
-            for i, (text, emb, src, cat) in enumerate(
-                zip(texts, embeddings, sources, categories)
+            for i, (text, emb, src, cat, meta) in enumerate(
+                zip(texts, embeddings, sources, categories, metadata)
             )
         ]
 
@@ -135,16 +141,16 @@ class QdrantStore:
                 ]
             )
 
-        results = self.client.search(
+        results = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_embedding,
+            query=query_embedding,
             limit=top_k,
             query_filter=query_filter,
             with_payload=True,
         )
 
         hits = []
-        for hit in results:
+        for hit in results.points:
             hits.append(
                 {
                     "content": hit.payload.get("content"),

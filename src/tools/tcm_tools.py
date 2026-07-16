@@ -52,16 +52,24 @@ class FangjiSearchTool(BaseTool):
         lines = [f"找到 {len(results)} 条相关方剂：\n"]
         for r in results:
             lines.append(f"【{r['name']}】")
-            lines.append(f"  出处：{r['source']}")
-            lines.append(f"  分类：{r['category']}")
-            lines.append(f"  组成：{r['composition']}")
-            lines.append(f"  用法：{r.get('usage_method', '')}")
-            lines.append(f"  功效：{r['efficacy']}")
-            lines.append(f"  主治：{r['indications']}")
+            if r.get('pinyin'):
+                lines.append(f"  拼音：{r['pinyin']}")
+            if r.get('category'):
+                lines.append(f"  分类：{r['category']}")
+            if r.get('ingredients'):
+                lines.append(f"  组成：{r['ingredients']}")
+            if r.get('usage'):
+                lines.append(f"  用法：{r['usage']}")
+            if r.get('functions'):
+                lines.append(f"  功效：{r['functions']}")
+            if r.get('clinical_use'):
+                lines.append(f"  临床应用：{r['clinical_use']}")
             if r.get('contraindications'):
                 lines.append(f"  禁忌：{r['contraindications']}")
-            if r.get('notes'):
-                lines.append(f"  备注：{r['notes']}")
+            if r.get('precautions'):
+                lines.append(f"  注意：{r['precautions']}")
+            if r.get('adverse_reactions'):
+                lines.append(f"  不良反应：{r['adverse_reactions']}")
             lines.append("")
         return "\n".join(lines)
 
@@ -87,15 +95,18 @@ class HerbSearchTool(BaseTool):
         lines = [f"找到 {len(results)} 条相关药材：\n"]
         for r in results:
             lines.append(f"【{r['name']}】{r.get('latin_name', '')}")
-            lines.append(f"  性味：{r['nature']}，{r['taste']}")
-            lines.append(f"  归经：{r['meridian']}")
-            lines.append(f"  功效：{r['efficacy']}")
-            lines.append(f"  主治：{r['indications']}")
-            lines.append(f"  用量：{r.get('dosage', '')}")
-            if r.get('toxicity') and r['toxicity'] != '无毒':
-                lines.append(f"  ⚠ 毒性：{r['toxicity']}")
-            if r.get('contraindications'):
-                lines.append(f"  禁忌：{r['contraindications']}")
+            if r.get('nature_taste_meridian'):
+                lines.append(f"  性味归经：{r['nature_taste_meridian']}")
+            if r.get('functions'):
+                lines.append(f"  功能主治：{r['functions']}")
+            if r.get('usage'):
+                lines.append(f"  用法用量：{r['usage']}")
+            if r.get('source'):
+                lines.append(f"  来源：{r['source']}")
+            if r.get('processing'):
+                lines.append(f"  炮制：{r['processing']}")
+            if r.get('caution'):
+                lines.append(f"  ⚠ 注意事项：{r['caution']}")
             lines.append("")
         return "\n".join(lines)
 
@@ -170,10 +181,13 @@ class ConstitutionTool(BaseTool):
 
 
 def get_all_tools() -> list:
-    """获取所有可用工具（含知识图谱工具）"""
+    """获取所有可用工具（含知识图谱 + RAG 语义检索）"""
+    from src.tools.rag_tool import TCMKnowledgeSearchTool
+
     return [
         FangjiSearchTool(),
         HerbSearchTool(),
         AcupointSearchTool(),
         ConstitutionTool(),
+        TCMKnowledgeSearchTool(),
     ] + get_graphrag_tools()

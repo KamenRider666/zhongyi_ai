@@ -17,7 +17,7 @@ from src.graphrag.graph_builder import TCMGraphBuilder
 def init_graph_data(
     neo4j_uri: str = "bolt://localhost:7687",
     neo4j_user: str = "neo4j",
-    neo4j_password: str = "zhongyi2024",
+    neo4j_password: str = "zhongyi_neo4j_2026",
 ) -> None:
     print("连接 Neo4j...")
     graph_store = Neo4jGraphStore(
