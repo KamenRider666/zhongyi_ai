@@ -5,7 +5,7 @@ from typing import Optional, Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-from src.data.database import TCMDatabase
+from src.data.database import TCMDatabase, get_database
 from src.tools.graphrag_tools import get_graphrag_tools
 
 
@@ -40,7 +40,7 @@ class FangjiSearchTool(BaseTool):
     )
     args_schema: Type[BaseModel] = FangjiSearchInput
 
-    db: TCMDatabase = Field(default_factory=lambda: TCMDatabase())
+    db: TCMDatabase = Field(default_factory=get_database)
 
     def _run(self, keyword: str, category: Optional[str] = None) -> str:
         results = self.db.search_fangji(keyword=keyword, category=category)
@@ -83,7 +83,7 @@ class HerbSearchTool(BaseTool):
     )
     args_schema: Type[BaseModel] = HerbSearchInput
 
-    db: TCMDatabase = Field(default_factory=lambda: TCMDatabase())
+    db: TCMDatabase = Field(default_factory=get_database)
 
     def _run(self, keyword: str, nature: Optional[str] = None) -> str:
         results = self.db.search_herb(keyword=keyword, nature=nature)
@@ -117,7 +117,7 @@ class AcupointSearchTool(BaseTool):
     description: str = "查询中医穴位信息。根据关键词搜索穴位的定位、功效、主治、操作手法等。"
     args_schema: Type[BaseModel] = AcupointSearchInput
 
-    db: TCMDatabase = Field(default_factory=lambda: TCMDatabase())
+    db: TCMDatabase = Field(default_factory=get_database)
 
     def _run(self, keyword: str) -> str:
         results = self.db.search_acupoint(keyword=keyword)
@@ -148,7 +148,7 @@ class ConstitutionTool(BaseTool):
     description: str = "查询中医体质类型信息。可查询九种体质的特征、调理方法、饮食建议等。不传参数则列出所有体质类型。"
     args_schema: Type[BaseModel] = ConstitutionInput
 
-    db: TCMDatabase = Field(default_factory=lambda: TCMDatabase())
+    db: TCMDatabase = Field(default_factory=get_database)
 
     def _run(self, type_name: Optional[str] = None) -> str:
         if type_name:

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # === 数据库 ===
     DB_TYPE: str = "mysql"           # "mysql" 或 "sqlite"
     SQLITE_PATH: str = "data/tcm.db"
-    MYSQL_HOST: str = "192.168.31.120"
+    MYSQL_HOST: str = "123.207.181.114"
     MYSQL_PORT: int = 3306
     MYSQL_USER: str = "root"
     MYSQL_PASSWORD: str = "dcdevtest"

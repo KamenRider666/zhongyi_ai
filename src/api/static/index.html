@@ -285,6 +285,8 @@ async function doLogin() {
 
     token = data.access_token;
     username = data.username;
+    localStorage.setItem('tcm_token', token);
+    localStorage.setItem('tcm_username', username);
     onAuthSuccess();
   } catch(e) {
     showError('login-error', e.message);
@@ -315,6 +317,8 @@ async function doRegister() {
 
     token = data.access_token;
     username = data.username;
+    localStorage.setItem('tcm_token', token);
+    localStorage.setItem('tcm_username', username);
     onAuthSuccess();
   } catch(e) {
     showError('reg-error', e.message);
@@ -558,8 +562,35 @@ document.getElementById('msg-input').addEventListener('input', function() {
 });
 
 // cookie 令牌恢复（可选）
-const saved = localStorage.getItem('tcm_token');
-if (saved) { token = saved; /* 不自动恢复 session，需重新登录 */ }
+const savedToken = localStorage.getItem('tcm_token');
+const savedUser = localStorage.getItem('tcm_username');
+const savedChats = localStorage.getItem('tcm_chats');
+if (savedToken && savedUser) {
+  token = savedToken;
+  username = savedUser;
+  if (savedChats) {
+    try { chats = JSON.parse(savedChats); } catch(e) { chats = {}; }
+  }
+  // 自动进入应用界面
+  document.getElementById('auth-view').style.display = 'none';
+  document.getElementById('app-view').classList.add('active');
+  document.getElementById('sidebar-user').textContent = username;
+  // 恢复会话列表
+  if (Object.keys(chats).length > 0) {
+    activeSession = Object.keys(chats)[0];
+    currentSessionId = activeSession;
+    renderSessions();
+    renderMessages();
+  } else {
+    newChat();
+  }
+}
+
+function saveState() {
+  localStorage.setItem('tcm_token', token);
+  localStorage.setItem('tcm_username', username);
+  localStorage.setItem('tcm_chats', JSON.stringify(chats));
+}
 
 </script>
 </body>

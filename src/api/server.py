@@ -107,7 +107,53 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "model": settings.QWEN_MODEL, "tools_available": True}
+    """健康检查 — 检测后端服务连通性"""
+    checks = {}
+    all_ok = True
+
+    # MySQL
+    try:
+        from src.data.database import get_database
+        db = get_database()
+        checks["mysql"] = "ok" if db.ping() else "fail"
+        if checks["mysql"] != "ok":
+            all_ok = False
+    except Exception as e:
+        checks["mysql"] = f"error: {e}"
+        all_ok = False
+
+    # Neo4j
+    try:
+        from src.graphrag.graph_store import Neo4jGraphStore
+        from src.config import settings as s
+        store = Neo4jGraphStore(uri=s.NEO4J_URI, user=s.NEO4J_USER, password=s.NEO4J_PASSWORD)
+        store.connect()
+        store.execute_query("RETURN 1")
+        store.close()
+        checks["neo4j"] = "ok"
+    except Exception as e:
+        checks["neo4j"] = f"error: {e}"
+        all_ok = False
+
+    # Qdrant
+    try:
+        from src.rag.qdrant_store import QdrantStore
+        from src.config import settings as s
+        qs = QdrantStore(dim=1024)
+        qs.connect()
+        ok = qs.collection_exists()
+        qs.disconnect()
+        checks["qdrant"] = "ok" if ok else "no_collection"
+    except Exception as e:
+        checks["qdrant"] = f"error: {e}"
+        all_ok = False
+
+    return {
+        "status": "healthy" if all_ok else "degraded",
+        "model": settings.QWEN_MODEL,
+        "tools_available": agent_executor is not None,
+        "checks": checks,
+    }
 
 
 # === 对话接口（需要登录） ===

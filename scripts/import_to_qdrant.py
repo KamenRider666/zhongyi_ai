@@ -1,11 +1,18 @@
-"""将 data/*.jsonl 中的中医知识导入 Qdrant 向量库
+"""从 MySQL 读取中医知识，导入 Qdrant 向量库
 
-每一条 JSONL 记录作为一个完整、独立的文本块，不再做段落切割。
+数据源：MySQL agenttest 库（统一数据源）
+  - herbs                                中药材
+  - formulas                             方剂/中成药
+  - diseases                             疾病（国标）
+  - syndromes                            证候（国标）
+  - dictionary_diag_dic_sym_dictionary   症状（诊疗词典，32766条）
+  - dictionary_diag_dic_ch_therapy_dictionary  治法（诊疗词典，1168条）
 
 用法:
-    uv run python scripts/import_to_qdrant.py                     # 导入全部 4 个文件
-    uv run python scripts/import_to_qdrant.py --file herbs.jsonl  # 只导入指定文件
-    uv run python scripts/import_to_qdrant.py --reset            # 先清空集合再导入
+    uv run python scripts/import_to_qdrant.py                  # 导入全部 6 类
+    uv run python scripts/import_to_qdrant.py --category herb   # 只导入药材
+    uv run python scripts/import_to_qdrant.py --reset           # 先清空集合再导入
+    uv run python scripts/import_to_qdrant.py --skip-symptoms   # 跳过症状（量大耗时）
 """
 
 import argparse
@@ -13,184 +20,229 @@ import json
 import os
 import sys
 
+import pymysql
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from src.config import settings
 from src.rag.embedding import DashScopeEmbedding
 from src.rag.qdrant_store import QdrantStore
 
-# 数据目录
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
-# 文件 → 分类标签
-FILE_CATEGORY_MAP = {
-    "herbs.jsonl": "herb",
-    "formulas_test.jsonl": "formula",
-    "diseases_test.jsonl": "disease",
-    "syndromes_test.jsonl": "syndrome",
-}
+# ═══════════════════════════════════════
+#  MySQL 读取
+# ═══════════════════════════════════════
+
+def get_mysql_conn():
+    return pymysql.connect(
+        host=settings.MYSQL_HOST,
+        port=settings.MYSQL_PORT,
+        user=settings.MYSQL_USER,
+        password=settings.MYSQL_PASSWORD,
+        database=settings.MYSQL_DATABASE,
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+    )
 
 
-def format_herb(item: dict) -> str:
-    """将一条中药记录格式化为检索友好的文本"""
+def query_table(table: str, columns: str = "*") -> list[dict]:
+    conn = get_mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {columns} FROM {table}")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+# ═══════════════════════════════════════
+#  格式化函数（MySQL dict → 检索文本）
+# ═══════════════════════════════════════
+
+def format_herb(r: dict) -> str:
     parts = []
-    if item.get("name"):
-        parts.append(f"【药名】{item['name']}")
-    if item.get("nature_taste_meridian"):
-        parts.append(f"【性味归经】{item['nature_taste_meridian']}")
-    if item.get("functions"):
-        parts.append(f"【功能主治】{item['functions']}")
-    if item.get("usage"):
-        parts.append(f"【用法用量】{item['usage']}")
-    if item.get("caution"):
-        parts.append(f"【注意事项】{item['caution']}")
-    if item.get("source"):
-        parts.append(f"【来源】{item['source']}")
+    if r.get("name"):
+        parts.append(f"【药名】{r['name']}")
+    if r.get("nature_taste_meridian"):
+        parts.append(f"【性味归经】{r['nature_taste_meridian']}")
+    if r.get("functions"):
+        parts.append(f"【功能主治】{r['functions']}")
+    if r.get("usage"):
+        parts.append(f"【用法用量】{r['usage']}")
+    if r.get("caution"):
+        parts.append(f"【注意事项】{r['caution']}")
+    if r.get("source"):
+        parts.append(f"【来源】{r['source']}")
     return "\n".join(parts)
 
 
-def format_formula(item: dict) -> str:
-    """将一条方剂记录格式化为检索友好的文本"""
+def format_formula(r: dict) -> str:
     parts = []
-    if item.get("name"):
-        parts.append(f"【方名】{item['name']}")
-    if item.get("category"):
-        parts.append(f"【分类】{item['category']}")
-    if item.get("ingredients"):
-        parts.append(f"【组成】{item['ingredients']}")
-    if item.get("functions"):
-        parts.append(f"【功能主治】{item['functions']}")
-    if item.get("analysis"):
-        # 去掉开头的【方解】标记，避免冗余
-        analysis = item["analysis"].removeprefix("【方解】").strip()
+    if r.get("name"):
+        parts.append(f"【方名】{r['name']}")
+    if r.get("category"):
+        parts.append(f"【分类】{r['category']}")
+    if r.get("ingredients"):
+        parts.append(f"【组成】{r['ingredients']}")
+    if r.get("functions"):
+        parts.append(f"【功能主治】{r['functions']}")
+    if r.get("analysis"):
+        analysis = r["analysis"].removeprefix("【方解】").strip()
         parts.append(f"【方解】{analysis}")
-    if item.get("clinical_use"):
-        clinical = item["clinical_use"].removeprefix("【临床应用】").strip()
+    if r.get("clinical_use"):
+        clinical = r["clinical_use"].removeprefix("【临床应用】").strip()
         parts.append(f"【临床应用】{clinical}")
     return "\n".join(parts)
 
 
-def format_disease(item: dict) -> str:
-    """将一条疾病记录格式化为检索友好的文本，跳过纯分类节点"""
+def format_disease(r: dict) -> str:
+    if r.get("is_category"):
+        return ""  # 跳过纯分类节点
     parts = []
-    if item.get("name"):
-        parts.append(f"【名称】{item['name']}")
-    if item.get("aliases") and len(item["aliases"]) > 0:
-        parts.append(f"【别名】{'、'.join(item['aliases'])}")
-    if item.get("definition"):
-        parts.append(f"【定义】{item['definition']}")
-    if item.get("code"):
-        parts.append(f"【编码】{item['code']}")
+    if r.get("name"):
+        parts.append(f"【名称】{r['name']}")
+    aliases = r.get("aliases")
+    if isinstance(aliases, str):
+        try:
+            aliases = json.loads(aliases)
+        except json.JSONDecodeError:
+            aliases = []
+    if isinstance(aliases, list) and len(aliases) > 0:
+        parts.append(f"【别名】{'、'.join(aliases)}")
+    if r.get("definition"):
+        parts.append(f"【定义】{r['definition']}")
+    if r.get("code"):
+        parts.append(f"【编码】{r['code']}")
     return "\n".join(parts)
 
 
-def format_syndrome(item: dict) -> str:
-    """将一条证候记录格式化为检索友好的文本，跳过纯分类节点"""
+def format_syndrome(r: dict) -> str:
+    if r.get("is_category"):
+        return ""
     parts = []
-    if item.get("name"):
-        parts.append(f"【名称】{item['name']}")
-    if item.get("aliases") and len(item["aliases"]) > 0:
-        parts.append(f"【别名】{'、'.join(item['aliases'])}")
-    if item.get("definition"):
-        parts.append(f"【定义】{item['definition']}")
-    if item.get("code"):
-        parts.append(f"【编码】{item['code']}")
+    if r.get("name"):
+        parts.append(f"【名称】{r['name']}")
+    aliases = r.get("aliases")
+    if isinstance(aliases, str):
+        try:
+            aliases = json.loads(aliases)
+        except json.JSONDecodeError:
+            aliases = []
+    if isinstance(aliases, list) and len(aliases) > 0:
+        parts.append(f"【别名】{'、'.join(aliases)}")
+    if r.get("definition"):
+        parts.append(f"【定义】{r['definition']}")
+    if r.get("code"):
+        parts.append(f"【编码】{r['code']}")
     return "\n".join(parts)
 
 
-# 分类 → 格式化函数
-FORMATTERS = {
-    "herb": format_herb,
-    "formula": format_formula,
-    "disease": format_disease,
-    "syndrome": format_syndrome,
+def format_symptom(r: dict) -> str:
+    parts = []
+    if r.get("name"):
+        parts.append(f"【症状】{r['name']}")
+    if r.get("dic_describe"):
+        parts.append(f"【描述】{r['dic_describe']}")
+    if r.get("directivity"):
+        parts.append(f"【指向】{r['directivity']}")
+    if r.get("common_sign") == "1":
+        parts.append("【常用】是")
+    if r.get("main_sign") == "1":
+        parts.append("【主证】是")
+    return "\n".join(parts)
+
+
+def format_therapy(r: dict) -> str:
+    parts = []
+    if r.get("name"):
+        parts.append(f"【治法】{r['name']}")
+    if r.get("dic_describe"):
+        parts.append(f"【描述】{r['dic_describe']}")
+    if r.get("directivity"):
+        parts.append(f"【指向】{r['directivity']}")
+    return "\n".join(parts)
+
+
+# ═══════════════════════════════════════
+#  类别配置：类别 → (MySQL表名, 格式化函数)
+# ═══════════════════════════════════════
+
+CATEGORY_CONFIG = {
+    "herb":     ("herbs",                                     format_herb),
+    "formula":  ("formulas",                                  format_formula),
+    "disease":  ("diseases",                                  format_disease),
+    "syndrome": ("syndromes",                                 format_syndrome),
+    "symptom":  ("dictionary_diag_dic_sym_dictionary",        format_symptom),
+    "therapy":  ("dictionary_diag_dic_ch_therapy_dictionary", format_therapy),
 }
 
 
-def import_files(
-    files: list[str],
+# ═══════════════════════════════════════
+#  导入逻辑
+# ═══════════════════════════════════════
+
+def import_from_mysql(
+    categories: list[str],
     reset: bool = False,
     batch_size: int = 10,
+    common_symptoms_only: bool = False,
 ) -> None:
-    """导入指定 JSONL 文件到 Qdrant
-
-    Args:
-        files: 要导入的文件名列表（如 ["herbs.jsonl", ...]）
-        reset: 是否先清空集合
-        batch_size: 每批嵌入的条数
-    """
     print("=" * 60)
-    print("中医知识库导入 Qdrant (JSONL 模式)")
+    print("中医知识库导入 Qdrant (MySQL 模式)")
+    print(f"  MySQL: {settings.MYSQL_HOST}:{settings.MYSQL_PORT}/{settings.MYSQL_DATABASE}")
     print("=" * 60)
-
-    from src.config import settings as s
 
     emb = DashScopeEmbedding(dimension=1024)
     store = QdrantStore(dim=1024)
     store.connect()
 
-    print(f"   Qdrant:  {s.QDRANT_HOST}:{s.QDRANT_PORT}  →  {store.collection_name}")
-    print(f"   Embedding: DashScope text-embedding-v3  (1024 dim)")
+    print(f"  Qdrant:  {settings.QDRANT_HOST}:{settings.QDRANT_PORT}  →  {store.collection_name}")
 
-    # 检查/创建集合
     if reset and store.collection_exists():
         print("\n[WARN] 删除已有集合...")
         store.delete_collection()
 
     store.create_collection()
 
-    # 遍历文件
     total_chunks = 0
     global_id = 0
 
-    for filename in files:
-        filepath = os.path.join(DATA_DIR, filename)
-        if not os.path.exists(filepath):
-            print(f"\n[WARN] 文件不存在，跳过: {filepath}")
+    for category in categories:
+        table, formatter = CATEGORY_CONFIG[category]
+        print(f"\n[{category.upper()}] 表: {table}")
+
+        # 读取数据
+        if category == "symptom" and common_symptoms_only:
+            conn = get_mysql_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT * FROM {table} WHERE name IS NOT NULL AND name != '' AND common_sign = '1'"
+                    )
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        else:
+            rows = query_table(table)
+
+        if not rows:
+            print(f"   → 无数据，跳过")
             continue
 
-        category = FILE_CATEGORY_MAP.get(filename, "unknown")
-        formatter = FORMATTERS.get(category)
-        print(f"\n[FILE] {filename}  (分类: {category})")
-
-        # 读取所有行，格式化为文本块
-        texts: list[str] = []
-        metadata: list[dict] = []
+        # 格式化
+        texts = []
+        metadata = []
         skipped = 0
 
-        with open(filepath, encoding="utf-8") as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    print(f"   [WARN] 第{line_num}行 JSON 解析失败，跳过")
-                    skipped += 1
-                    continue
-
-                # 跳过纯分类占位节点（如 diseases 中的 is_category=true）
-                if item.get("is_category"):
-                    skipped += 1
-                    continue
-
-                if formatter:
-                    text = formatter(item)
-                else:
-                    # 兜底：直接把 JSON 对象转字符串
-                    text = json.dumps(item, ensure_ascii=False)
-
-                if not text.strip():
-                    skipped += 1
-                    continue
-
-                texts.append(text)
-                # 剔除与 payload 顶层冲突的字段（content/source/category 已单独存储）
-                meta_item = {k: v for k, v in item.items()
-                             if k not in ("content", "source", "category")}
-                metadata.append(meta_item)
+        for r in rows:
+            text = formatter(r)
+            if not text.strip():
+                skipped += 1
+                continue
+            texts.append(text)
+            meta = {k: v for k, v in r.items() if v is not None}
+            metadata.append(meta)
 
         valid = len(texts)
         print(f"   → {valid} 条有效记录" + (f"（跳过 {skipped} 条）" if skipped else ""))
@@ -199,14 +251,11 @@ def import_files(
             continue
 
         # 批量嵌入 + 存储
-        sources = [filename] * valid
-        categories = [category] * valid
-
         for i in tqdm(range(0, valid, batch_size), desc="  嵌入 & 存储"):
             batch_texts = texts[i:i + batch_size]
             batch_meta = metadata[i:i + batch_size]
-            batch_src = sources[i:i + batch_size]
-            batch_cat = categories[i:i + batch_size]
+            batch_cat = [category] * len(batch_texts)
+            batch_src = [table] * len(batch_texts)
 
             try:
                 batch_emb = emb.encode(batch_texts)
@@ -226,31 +275,49 @@ def import_files(
 
         total_chunks += valid
 
-    # 完成
     stats = store.get_stats()
     store.disconnect()
 
     print("\n" + "=" * 60)
-    print(f"\n[OK] 导入完成！共 {total_chunks} 条记录存入 Qdrant")
+    print(f"[OK] 导入完成！共 {total_chunks} 条记录存入 Qdrant")
     print(f"   统计: {stats['points']} 个向量")
     print("=" * 60)
 
 
+# ═══════════════════════════════════════
+#  CLI
+# ═══════════════════════════════════════
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="导入中医知识 JSONL 到 Qdrant")
+    parser = argparse.ArgumentParser(description="从 MySQL 导入中医知识到 Qdrant")
     parser.add_argument(
-        "--file", type=str, default=None,
-        help="指定单个文件名（默认导入全部 4 个）",
+        "--category", type=str, default=None,
+        choices=list(CATEGORY_CONFIG.keys()),
+        help="只导入指定类别（默认全部 6 类）",
     )
     parser.add_argument(
         "--reset", action="store_true",
         help="先清空已有集合再导入",
     )
+    parser.add_argument(
+        "--skip-symptoms", action="store_true",
+        help="跳过症状导入（32766条，量大耗时）",
+    )
+    parser.add_argument(
+        "--common-symptoms-only", action="store_true",
+        help="只导入常用症状（common_sign=1）",
+    )
     args = parser.parse_args()
 
-    if args.file:
-        files = [args.file]
+    if args.category:
+        cats = [args.category]
     else:
-        files = list(FILE_CATEGORY_MAP.keys())
+        cats = list(CATEGORY_CONFIG.keys())
+        if args.skip_symptoms:
+            cats = [c for c in cats if c != "symptom"]
 
-    import_files(files, reset=args.reset)
+    import_from_mysql(
+        categories=cats,
+        reset=args.reset,
+        common_symptoms_only=args.common_symptoms_only,
+    )

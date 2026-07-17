@@ -1,6 +1,7 @@
-"""数据库管理 - 支持 MySQL 和 SQLite（通过 DB_TYPE 配置切换，默认 mysql）"""
+"""数据库管理 - 支持 MySQL 和 SQLite（持久连接 + 自动重连）"""
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -11,26 +12,19 @@ from src.config import settings
 
 
 class TCMDatabase:
-    """中医结构化数据库
+    """中医结构化数据库（持久连接版）
 
-    用法:
-        # 使用默认配置（默认 MySQL）
-        db = TCMDatabase()
-
-        # 显式指定 SQLite
-        db = TCMDatabase(db_type="sqlite", db_path="data/tcm.db")
-
-        # 显式指定 MySQL
-        db = TCMDatabase(db_type="mysql", host="127.0.0.1", port=3306, ...)
+    连接策略:
+      - MySQL: 持久连接 + ping(reconnect=True) 自动重连
+      - SQLite: 持久连接
+      - 所有查询复用同一连接，不再每次新建/关闭
     """
 
     def __init__(
         self,
         db_type: Optional[str] = None,
         *,
-        # ── SQLite ──
         db_path: Optional[str] = None,
-        # ── MySQL ──
         host: Optional[str] = None,
         port: Optional[int] = None,
         user: Optional[str] = None,
@@ -44,6 +38,7 @@ class TCMDatabase:
         self.user = user or settings.MYSQL_USER
         self.password = password or settings.MYSQL_PASSWORD
         self.database = database or settings.MYSQL_DATABASE
+        self._conn = None  # 持久连接
 
         if self.db_type == "sqlite":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -54,23 +49,13 @@ class TCMDatabase:
         return f"TCMDatabase(mysql, {self.user}@{self.host}:{self.port}/{self.database})"
 
     # ──────────────────────────────────────────────
-    #  内部工具
+    #  连接管理
     # ──────────────────────────────────────────────
 
-    @property
-    def _ph(self) -> str:
-        """参数占位符: SQLite 用 ?, MySQL 用 %s"""
-        return "?" if self.db_type == "sqlite" else "%s"
-
-    @property
-    def _insert_ignore(self) -> str:
-        """INSERT 忽略重复语法"""
-        return "INSERT OR IGNORE" if self.db_type == "sqlite" else "INSERT IGNORE"
-
-    def get_conn(self):
-        """获取数据库连接"""
+    def _create_conn(self):
+        """创建新连接"""
         if self.db_type == "sqlite":
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
         else:
             conn = pymysql.connect(
@@ -81,15 +66,67 @@ class TCMDatabase:
                 database=self.database,
                 charset="utf8mb4",
                 cursorclass=DictCursor,
+                autocommit=True,
             )
         return conn
 
-    def _exec_sql(self, sql: str, *args: Any) -> None:
-        """执行写操作，自动 commit + close"""
+    def get_conn(self):
+        """获取持久连接，断线自动重连"""
+        if self._conn is None:
+            self._conn = self._create_conn()
+            return self._conn
+        # 检查连接是否还活着
+        if self.db_type == "mysql":
+            try:
+                self._conn.ping(reconnect=True)
+            except Exception:
+                self._conn = self._create_conn()
+        return self._conn
+
+    @contextmanager
+    def _cursor(self):
+        """游标上下文管理器，复用持久连接，只关闭游标不关闭连接"""
         conn = self.get_conn()
-        conn.cursor().execute(sql, args)
-        conn.commit()
-        conn.close()
+        cur = conn.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
+
+    def close(self):
+        """关闭连接（服务退出时调用）"""
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def ping(self) -> bool:
+        """检测连接是否可用"""
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
+    # ──────────────────────────────────────────────
+    #  内部工具
+    # ──────────────────────────────────────────────
+
+    @property
+    def _ph(self) -> str:
+        return "?" if self.db_type == "sqlite" else "%s"
+
+    @property
+    def _insert_ignore(self) -> str:
+        return "INSERT OR IGNORE" if self.db_type == "sqlite" else "INSERT IGNORE"
+
+    def _exec_sql(self, sql: str, *args: Any) -> None:
+        """执行写操作（autocommit=True，无需手动 commit）"""
+        with self._cursor() as cur:
+            cur.execute(sql, args)
 
     # ──────────────────────────────────────────────
     #  建表
@@ -102,71 +139,40 @@ class TCMDatabase:
 
     def init_db(self) -> None:
         """初始化数据库表结构"""
-        ph = self._ph
         suffix = self._TABLE_SUFFIX[self.db_type]
+        pk = "INTEGER PRIMARY KEY AUTOINCREMENT" if self.db_type == "sqlite" else "INT AUTO_INCREMENT PRIMARY KEY"
 
         self._exec_sql(f"""
             CREATE TABLE IF NOT EXISTS fangji (
-                id {"INTEGER PRIMARY KEY AUTOINCREMENT" if self.db_type == "sqlite" else "INT AUTO_INCREMENT PRIMARY KEY"},
-                name VARCHAR(200) NOT NULL UNIQUE,
-                alias VARCHAR(200),
-                source VARCHAR(200) NOT NULL,
-                category VARCHAR(100) NOT NULL,
-                composition TEXT NOT NULL,
-                usage_method TEXT,
-                efficacy TEXT NOT NULL,
-                indications TEXT NOT NULL,
-                contraindications TEXT,
-                notes TEXT,
+                id {pk}, name VARCHAR(200) NOT NULL UNIQUE, alias VARCHAR(200),
+                source VARCHAR(200) NOT NULL, category VARCHAR(100) NOT NULL,
+                composition TEXT NOT NULL, usage_method TEXT, efficacy TEXT NOT NULL,
+                indications TEXT NOT NULL, contraindications TEXT, notes TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ){suffix}
         """)
-
         self._exec_sql(f"""
             CREATE TABLE IF NOT EXISTS herb (
-                id {"INTEGER PRIMARY KEY AUTOINCREMENT" if self.db_type == "sqlite" else "INT AUTO_INCREMENT PRIMARY KEY"},
-                name VARCHAR(200) NOT NULL UNIQUE,
-                latin_name VARCHAR(200),
-                alias VARCHAR(200),
-                nature VARCHAR(50) NOT NULL,
-                taste VARCHAR(100) NOT NULL,
-                meridian VARCHAR(200) NOT NULL,
-                efficacy TEXT NOT NULL,
-                indications TEXT NOT NULL,
-                dosage VARCHAR(100),
-                toxicity VARCHAR(100),
-                contraindications TEXT,
+                id {pk}, name VARCHAR(200) NOT NULL UNIQUE, latin_name VARCHAR(200),
+                alias VARCHAR(200), nature VARCHAR(50) NOT NULL, taste VARCHAR(100) NOT NULL,
+                meridian VARCHAR(200) NOT NULL, efficacy TEXT NOT NULL, indications TEXT NOT NULL,
+                dosage VARCHAR(100), toxicity VARCHAR(100), contraindications TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ){suffix}
         """)
-
         self._exec_sql(f"""
             CREATE TABLE IF NOT EXISTS acupoint (
-                id {"INTEGER PRIMARY KEY AUTOINCREMENT" if self.db_type == "sqlite" else "INT AUTO_INCREMENT PRIMARY KEY"},
-                name VARCHAR(200) NOT NULL UNIQUE,
-                pinyin VARCHAR(200),
-                meridian VARCHAR(200) NOT NULL,
-                location TEXT NOT NULL,
-                method VARCHAR(200) NOT NULL,
-                efficacy TEXT NOT NULL,
-                indications TEXT NOT NULL,
-                technique VARCHAR(200),
-                cautions TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                id {pk}, name VARCHAR(200) NOT NULL UNIQUE, pinyin VARCHAR(200),
+                meridian VARCHAR(200) NOT NULL, location TEXT NOT NULL, method VARCHAR(200) NOT NULL,
+                efficacy TEXT NOT NULL, indications TEXT NOT NULL, technique VARCHAR(200),
+                cautions TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ){suffix}
         """)
-
         self._exec_sql(f"""
             CREATE TABLE IF NOT EXISTS constitution (
-                id {"INTEGER PRIMARY KEY AUTOINCREMENT" if self.db_type == "sqlite" else "INT AUTO_INCREMENT PRIMARY KEY"},
-                type_name VARCHAR(200) NOT NULL UNIQUE,
-                characteristics TEXT NOT NULL,
-                tendency TEXT,
-                regulation TEXT NOT NULL,
-                diet_advice TEXT,
-                exercise_advice TEXT,
-                acupoint_advice TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                id {pk}, type_name VARCHAR(200) NOT NULL UNIQUE, characteristics TEXT NOT NULL,
+                tendency TEXT, regulation TEXT NOT NULL, diet_advice TEXT, exercise_advice TEXT,
+                acupoint_advice TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ){suffix}
         """)
 
@@ -175,7 +181,6 @@ class TCMDatabase:
     # ──────────────────────────────────────────────
 
     def insert_ignore(self, table: str, columns: List[str], values: tuple) -> None:
-        """忽略重复的插入，自动适配 SQLite/MySQL"""
         cols = ", ".join(columns)
         vals = ", ".join([self._ph] * len(columns))
         sql = f"{self._insert_ignore} INTO {table} ({cols}) VALUES ({vals})"
@@ -186,19 +191,11 @@ class TCMDatabase:
     # ──────────────────────────────────────────────
 
     def search_fangji(
-        self,
-        keyword: Optional[str] = None,
-        category: Optional[str] = None,
-        limit: int = 10,
+        self, keyword: Optional[str] = None, category: Optional[str] = None, limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """搜索方剂"""
-        conn = self.get_conn()
-        cursor = conn.cursor()
         ph = self._ph
-
         query = "SELECT * FROM formulas WHERE 1=1"
         params: List[Any] = []
-
         if keyword:
             query += f" AND (name LIKE {ph} OR functions LIKE {ph} OR clinical_use LIKE {ph})"
             kw = f"%{keyword}%"
@@ -206,23 +203,17 @@ class TCMDatabase:
         if category:
             query += f" AND category = {ph}"
             params.append(category)
-
         query += f" LIMIT {ph}"
         params.append(limit)
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        conn.close()
-
+        with self._cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
         return [dict(row) for row in rows]
 
     def get_fangji_by_name(self, name: str) -> Optional[Dict[str, Any]]:
-        """根据名称获取方剂"""
-        conn = self.get_conn()
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM formulas WHERE name LIKE {self._ph}", (f"%{name}%",))
-        row = cursor.fetchone()
-        conn.close()
+        with self._cursor() as cur:
+            cur.execute(f"SELECT * FROM formulas WHERE name LIKE {self._ph}", (f"%{name}%",))
+            row = cur.fetchone()
         return dict(row) if row else None
 
     # ──────────────────────────────────────────────
@@ -230,20 +221,12 @@ class TCMDatabase:
     # ──────────────────────────────────────────────
 
     def search_herb(
-        self,
-        keyword: Optional[str] = None,
-        nature: Optional[str] = None,
-        meridian: Optional[str] = None,
-        limit: int = 10,
+        self, keyword: Optional[str] = None, nature: Optional[str] = None,
+        meridian: Optional[str] = None, limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """搜索药材"""
-        conn = self.get_conn()
-        cursor = conn.cursor()
         ph = self._ph
-
         query = "SELECT * FROM herbs WHERE 1=1"
         params: List[Any] = []
-
         if keyword:
             query += f" AND (name LIKE {ph} OR functions LIKE {ph})"
             kw = f"%{keyword}%"
@@ -254,23 +237,17 @@ class TCMDatabase:
         if meridian:
             query += f" AND nature_taste_meridian LIKE {ph}"
             params.append(f"%{meridian}%")
-
         query += f" LIMIT {ph}"
         params.append(limit)
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        conn.close()
-
+        with self._cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
         return [dict(row) for row in rows]
 
     def get_herb_by_name(self, name: str) -> Optional[Dict[str, Any]]:
-        """根据名称获取药材"""
-        conn = self.get_conn()
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM herbs WHERE name LIKE {self._ph}", (f"%{name}%",))
-        row = cursor.fetchone()
-        conn.close()
+        with self._cursor() as cur:
+            cur.execute(f"SELECT * FROM herbs WHERE name LIKE {self._ph}", (f"%{name}%",))
+            row = cur.fetchone()
         return dict(row) if row else None
 
     # ──────────────────────────────────────────────
@@ -278,19 +255,11 @@ class TCMDatabase:
     # ──────────────────────────────────────────────
 
     def search_acupoint(
-        self,
-        keyword: Optional[str] = None,
-        meridian: Optional[str] = None,
-        limit: int = 10,
+        self, keyword: Optional[str] = None, meridian: Optional[str] = None, limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """搜索穴位"""
-        conn = self.get_conn()
-        cursor = conn.cursor()
         ph = self._ph
-
         query = "SELECT * FROM acupoint WHERE 1=1"
         params: List[Any] = []
-
         if keyword:
             query += f" AND (name LIKE {ph} OR indications LIKE {ph})"
             kw = f"%{keyword}%"
@@ -298,14 +267,11 @@ class TCMDatabase:
         if meridian:
             query += f" AND meridian = {ph}"
             params.append(meridian)
-
         query += f" LIMIT {ph}"
         params.append(limit)
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        conn.close()
-
+        with self._cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
         return [dict(row) for row in rows]
 
     # ──────────────────────────────────────────────
@@ -313,19 +279,28 @@ class TCMDatabase:
     # ──────────────────────────────────────────────
 
     def get_constitution(self, type_name: str) -> Optional[Dict[str, Any]]:
-        """获取体质类型信息"""
-        conn = self.get_conn()
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM constitution WHERE type_name LIKE {self._ph}", (f"%{type_name}%",))
-        row = cursor.fetchone()
-        conn.close()
+        with self._cursor() as cur:
+            cur.execute(f"SELECT * FROM constitution WHERE type_name LIKE {self._ph}", (f"%{type_name}%",))
+            row = cur.fetchone()
         return dict(row) if row else None
 
     def list_constitutions(self) -> List[Dict[str, Any]]:
-        """列出所有体质类型"""
-        conn = self.get_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM constitution")
-        rows = cursor.fetchall()
-        conn.close()
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM constitution")
+            rows = cur.fetchall()
         return [dict(row) for row in rows]
+
+
+# ──────────────────────────────────────────────
+#  模块级单例（所有工具共享）
+# ──────────────────────────────────────────────
+
+_db_instance: TCMDatabase | None = None
+
+
+def get_database() -> TCMDatabase:
+    """获取共享的 TCMDatabase 实例（单例）"""
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = TCMDatabase()
+    return _db_instance

@@ -1,212 +1,237 @@
-"""解析 中药成方制剂 → formulas.jsonl
+"""解析 中药成方制剂.txt → formulas.jsonl
 
-用法: uv run python src/graphrag/parsers/parse_formulas.py --test
-   或: uv run python src/graphrag/parsers/parse_formulas.py
+纯程序解析，不使用 LLM。
 
-注意: 成方制剂文件有大量前言（L1-L518），数据从 L519 "各论" 开始。
+文件结构:
+  - 前言（L1-L518，跳过）
+  - "各论" 标记（L520）
+  - 科系分类：内科类、外科类 等
+  - 功效分类：一、解表剂 等（含概述段落）
+  - 细分类：(一)辛温解表 等
+  - 方剂条目：
+    方名（中文）
+    Pinyin（拼音，可能跨多行）
+    【药物组成】...
+    【功能与主治】...
+    【方解】...
+    【临床应用】...
+    【药理毒理】...
+    【不良反应】...
+    【禁忌】...
+    【注意事项】...
+    【用法与用量】...
+    【规格】...
+    【参考文献】...
+
+用法:
+    uv run python -m src.graphrag.parsers.parse_formulas
 """
 
-import  json
-from ..llm_parser_utils import call_llm
+import json
+import re
+from pathlib import Path
 
-# ============================================================
-# Step 1: 分析文件结构，定位数据起始位置，确定实例最大尺寸
-# ============================================================
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-DATA_FILE = "/src/graphrag/data/中药成方制剂.txt"
-OUTPUT_FILE = "/src/graphrag/data/formulas.jsonl"
+DATA_FILE = _PROJECT_ROOT / "src" / "graphrag" / "data" / "中药成方制剂.txt"
+OUTPUT_FILE = _PROJECT_ROOT / "data" / "formulas.jsonl"
 
-with open(DATA_FILE, encoding="utf-8") as f:
-    full_text = f.read()
-lines = full_text.split("\n")
-
-print(f"文件总大小: {len(full_text)} 字符, {len(lines)} 行")
-
-# 查找 "各论" 的位置（真正数据开始处）
-gulun_pos = full_text.find("\n各论\n")
-if gulun_pos == -1:
-    gulun_pos = full_text.find("各论\n")
-print(f"数据起始位置 '各论': 字符偏移={gulun_pos}, 对应行号 ~{full_text[:gulun_pos].count(chr(10))}")
-
-# 预览各论开始后的前 200 行
-data_start = gulun_pos
-preview = full_text[data_start:data_start + 10000]
-preview_lines = preview.split("\n")
-print(f"\n'各论'之后的预览 (前 100 行):")
-print("=" * 60)
-for i, line in enumerate(preview_lines[:100], 1):
-    print(f"L{i:3d}: {line[:120]}")
-print("=" * 60)
-
-# 分析: 一个成方约 10~40 行, 每行 ~60 字符, 最大约 3000 字符
-MAX_INSTANCE_CHARS = 3000
-CHUNK_SIZE = int(MAX_INSTANCE_CHARS * 2.2)  # 6600
-
-# ============================================================
-# Step 2: 定义 JSON 模板
-# ============================================================
-
-FORMULA_TEMPLATE = {
-    "name": "药品名称",
-    "pinyin": "汉语拼音",
-    "category": "分类（如 辛温解表）",
-    "ingredients": "药物组成原文",
-    "functions": "功能与主治原文",
-    "analysis": "方解原文（包含君臣佐使分析）",
-    "clinical_use": "临床应用原文",
-    "pharmacology": "药理毒理原文（若无则为空字符串）",
-    "adverse_reactions": "不良反应原文（若无则为空字符串）",
-    "contraindications": "禁忌原文（若无则为空字符串）",
-    "precautions": "注意事项原文",
-    "usage": "用法与用量原文",
-    "specs": "规格原文",
-    "references": ["参考文献1", "参考文献2"],
-}
-
-# ============================================================
-# Step 3: LLM 解析函数
-# ============================================================
-
-def parse_first_formula(chunk: str) -> tuple[dict | None, int]:
-    """用 LLM 从 chunk 中提取第一个成方条目"""
-    schema_str = json.dumps(FORMULA_TEMPLATE, ensure_ascii=False, indent=2)
-
-    system = (
-        "你是一个精确的中药成方制剂文本解析器。从一段中成药文本中，"
-        "精确找到「第一个完整的成方条目」，提取为指定 JSON 格式。\n\n"
-        "识别规则：\n"
-        "1. 文本以分类标题开头（如\"内科类\\n一、解表剂\\n(一)辛温解表\"），"
-        "然后是连续多个中成药条目。\n"
-        "2. 每个中成药条目格式：药品名称 → 汉语拼音 → 【药物组成】【功能与主治】\n"
-        "   【方解】【临床应用】【药理毒理】【不良反应】【禁忌】【注意事项】\n"
-        "   【用法与用量】【规格】【参考文献】。\n"
-        "3. 一个条目在下一个药品名称出现前结束。有【参考文献】的到参考文献结束。\n"
-        "4. 分类标题行（如\"(一)辛温解表\"）不算作条目，跳过它们。\n"
-        "5. category 字段填分类标签（如\"辛温解表\"\"清热剂\"等），从最近的分类标题提取。\n"
-        "6. 所有字段尽量保留原文完整内容，不要截断。\n\n"
-        "输出格式：\n"
-        "第一行: CUTOFF:N （N 是该条目在原文中的截止字符位置，从 0 起算）\n"
-        "第二行起: 完整的 JSON, 严格按模板字段填写。"
-    )
-
-    user = (
-        f"请从以下成方制剂文本中提取第一个完整的成方条目：\n\n"
-        f"=== 文本开始 ===\n```\n{chunk}\n```\n=== 文本结束 ===\n\n"
-        f"JSON 模板：\n```json\n{schema_str}\n```\n\n"
-        f"记住：\n"
-        f"- 第一行必须是 CUTOFF:N\n"
-        f"- 如果 chunk 开头就是分类标题（如\"(三)辛凉解表\"），请跳过它提取之后第一个药品\n"
-        f"- 第二行起是完整 JSON"
-    )
-
-    print(f"  请求 LLM (chunk={len(chunk)} chars)...", end=" ", flush=True)
-    raw = call_llm(system, user)
-    print(f"响应={len(raw)} chars")
-
-    header, _, body = raw.strip().partition("\n")
-    cutoff = 0
-    if header.startswith("CUTOFF:"):
-        try:
-            cutoff = int(header.split(":", 1)[1].strip())
-        except ValueError:
-            print(f"  警告: CUTOFF 解析失败: {header}")
-
-    body = body.strip()
-    if body.startswith("```"):
-        body = body.split("\n", 1)[-1] if "\n" in body else ""
-    if body.endswith("```"):
-        body = body.rsplit("```", 1)[0]
-    body = body.strip()
-
-    parsed = None
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError as e:
-        print(f"  JSON 解析失败: {e}")
-        print(f"  原始内容前 200 字符: {body[:200]}")
-
-    return parsed, cutoff
+SECTION_RE = re.compile(r"^【(.+?)】(.*)$")
+# 拼音行：以大写英文字母开头
+PINYIN_RE = re.compile(r"^[A-Z][a-zA-Z]")
+# 大分类标题：一、解表剂 / 二、清热剂
+CATEGORY_HEADER_RE = re.compile(r"^[一二三四五六七八九十]+[、.](.+)")
+# 细分类标题：(一)辛温解表 / (二)辛凉解表
+SUBCATEGORY_RE = re.compile(r"^\([一二三四五六七八九十]+\)(.+)")
 
 
-# ============================================================
-# Step 4: 核心循环（test 和 main 共用）
-# ============================================================
+def _is_formula_name(line: str) -> bool:
+    """判断是否为方剂名：中文、不含数字编号、不以【开头"""
+    if not line or line.startswith("【") or line.startswith("注"):
+        return False
+    if CATEGORY_HEADER_RE.match(line):
+        return False
+    if line.endswith("类") or line.endswith("剂"):
+        return False
+    # 纯英文/拼音行不是方名
+    if PINYIN_RE.match(line):
+        return False
+    # 含中文字符且不太长（方名一般 2-30 字符）
+    if re.search(r"[\u4e00-\u9fff]", line) and len(line) <= 50:
+        return True
+    return False
 
-def _run(max_rounds: int | None = None):
-    """核心解析循环。max_rounds=None 表示跑完全部。"""
-    mode = "测试" if max_rounds else "正式"
-    output_file = OUTPUT_FILE if max_rounds is None else (
-        SRC_DIR.parent / "data" / "formulas_test.jsonl"
-    )
-    print(f"\n=== [{mode}模式] 最多 {max_rounds or '不限'} 轮 ===")
-    print(f"配置: MAX_INSTANCE={MAX_INSTANCE_CHARS} chars, CHUNK_SIZE={CHUNK_SIZE} chars")
-    print(f"输入: {DATA_FILE}")
-    print(f"输出: {output_file}")
-    print("=" * 60)
 
-    gulun_pos = full_text.find("\n各论\n")
-    if gulun_pos == -1:
-        gulun_pos = full_text.find("各论\n")
-    if gulun_pos == -1:
-        print("错误: 找不到 '各论' 起始位置!")
-        return
+def _is_pinyin_line(line: str) -> bool:
+    """是否为拼音行"""
+    return bool(PINYIN_RE.match(line))
 
-    text = full_text[gulun_pos + 1:]
-    total_chars = len(text)
 
-    count = 0
-    skipped_categories = 0
+def parse() -> list[dict]:
+    with open(DATA_FILE, encoding="utf-8") as f:
+        lines = [l.rstrip("\n") for l in f]
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    # 找到 "各论" 位置，跳过前言
+    start_idx = 0
+    for i, line in enumerate(lines):
+        if line.strip() == "各论":
+            start_idx = i + 1
+            break
 
-    with open(output_file, "w", encoding="utf-8") as f_out:
-        while text.strip():
-            if max_rounds and count >= max_rounds:
-                print(f"\n  达到 {max_rounds} 轮上限, 停止。")
-                break
+    lines = lines[start_idx:]
+    total = len(lines)
+    entries: list[dict] = []
+    i = 0
+    current_category = ""  # 跟踪当前细分类（如"辛温解表"）
 
-            chunk = text[:CHUNK_SIZE]
+    while i < total:
+        line = lines[i].strip()
 
-            parsed, cutoff = parse_first_formula(chunk)
+        # 跟踪细分类标题：(一)辛温解表
+        sub_m = SUBCATEGORY_RE.match(line)
+        if sub_m:
+            current_category = sub_m.group(1).strip()
+            i += 1
+            continue
 
-            if parsed and cutoff > 0:
-                name = parsed.get("name", "").strip()
-                if not name or len(name) > 30:
-                    skip = min(100, len(text))
-                    print(f"  跳过分类/异常行, 前进 {skip} chars")
-                    skipped_categories += 1
-                    text = text[skip:]
+        # 跟踪大分类标题：一、解表剂
+        cat_m = CATEGORY_HEADER_RE.match(line)
+        if cat_m:
+            # 大分类作为兜底（细分类更精确，优先用细分类）
+            if not current_category:
+                current_category = cat_m.group(1).strip()
+            i += 1
+            continue
+
+        # 科系大类（内科类、外科类等）重置细分类
+        if line.endswith("类") and len(line) <= 10:
+            current_category = ""
+            i += 1
+            continue
+
+        # 检测方剂开始：方名 + 下一行是拼音
+        if _is_formula_name(line) and i + 1 < total and _is_pinyin_line(lines[i + 1].strip()):
+            name = line
+            # 收集拼音（可能跨多行）
+            pinyin_parts: list[str] = []
+            i += 1
+            while i < total:
+                nl = lines[i].strip()
+                if not nl:
+                    i += 1
+                    break
+                if _is_pinyin_line(nl):
+                    pinyin_parts.append(nl)
+                    i += 1
+                elif nl.startswith("【"):
+                    break
+                else:
+                    # 非拼音非【】行，可能是拼音的续行或方名的补充
+                    if pinyin_parts:
+                        pinyin_parts.append(nl)
+                        i += 1
+                    else:
+                        break
+            pinyin = " ".join(pinyin_parts)
+
+            # 解析【】字段
+            sections: dict[str, str] = {}
+            current_section = None
+            current_text: list[str] = []
+
+            while i < total:
+                nl = lines[i].strip()
+                if not nl:
+                    i += 1
                     continue
 
-                f_out.write(json.dumps(parsed, ensure_ascii=False) + "\n")
-                count += 1
-                text = text[cutoff:]
-                progress = 100 * (1 - len(text) / total_chars)
-                cat = parsed.get("category", "?")
-                print(f"  [{count}] [{cat}] {name} | cutoff={cutoff} | 剩余={len(text)} chars | 进度={progress:.1f}%")
-            else:
-                skip = min(500, len(text))
-                print(f"  无法解析, 跳过 {skip} chars")
-                text = text[skip:]
+                # 下一个方剂开始？
+                if _is_formula_name(nl) and i + 1 < total and _is_pinyin_line(lines[i + 1].strip()):
+                    break
 
-    print(f"\n{'=' * 60}")
-    print(f"完成! 共解析 {count} 条成方, 跳过分类 {skipped_categories} 次, 输出到 {output_file}")
+                m = SECTION_RE.match(nl)
+                if m:
+                    if current_section:
+                        sections[current_section] = "".join(current_text).strip()
+                    current_section = m.group(1)
+                    rest = m.group(2).strip()
+                    current_text = [rest] if rest else []
+                else:
+                    if current_section:
+                        current_text.append(nl)
+                    # 没有 current_section 的行（分类描述等）跳过
+                i += 1
 
+            # 保存最后一个 section
+            if current_section:
+                sections[current_section] = "".join(current_text).strip()
 
-def test():
-    """可行性测试：只解析前 10 个实例"""
-    _run(max_rounds=10)
+            # 解析参考文献为列表
+            refs_text = sections.get("参考文献", "")
+            references = []
+            if refs_text:
+                # 按 [1] [2] 或序号拆分
+                ref_parts = re.split(r"\[\d+\]", refs_text)
+                references = [p.strip() for p in ref_parts if p.strip()]
+
+            entries.append({
+                "name": name,
+                "pinyin": pinyin,
+                "category": current_category,
+                "ingredients": sections.get("药物组成", ""),
+                "functions": sections.get("功能与主治", sections.get("功能主治", "")),
+                "analysis": sections.get("方解", ""),
+                "clinical_use": sections.get("临床应用", ""),
+                "pharmacology": sections.get("药理毒理", ""),
+                "adverse_reactions": sections.get("不良反应", ""),
+                "contraindications": sections.get("禁忌", ""),
+                "precautions": sections.get("注意事项", ""),
+                "usage": sections.get("用法与用量", sections.get("用法用量", "")),
+                "specs": sections.get("规格", ""),
+                "references": references,
+            })
+            continue
+
+        i += 1
+
+    return entries
 
 
 def main():
-    """正式运行：解析全部"""
-    _run(max_rounds=None)
+    output_file = OUTPUT_FILE
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"输入: {DATA_FILE}")
+    print(f"输出: {output_file}")
+
+    entries = parse()
+    print(f"\n解析完成: 共 {len(entries)} 条方剂")
+    print(f"  有分类: {sum(1 for e in entries if e['category'])}")
+    print(f"  有药物组成: {sum(1 for e in entries if e['ingredients'])}")
+    print(f"  有功能主治: {sum(1 for e in entries if e['functions'])}")
+    print(f"  有方解: {sum(1 for e in entries if e['analysis'])}")
+    print(f"  有临床应用: {sum(1 for e in entries if e['clinical_use'])}")
+
+    # 分类统计
+    cats = {}
+    for e in entries:
+        c = e["category"]
+        if c:
+            cats[c] = cats.get(c, 0) + 1
+    if cats:
+        print(f"\n  分类分布 (前 10):")
+        for c, n in sorted(cats.items(), key=lambda x: -x[1])[:10]:
+            print(f"    {c}: {n}")
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+    print(f"\n输出到: {output_file}")
+    print("\n前 3 条预览:")
+    for e in entries[:3]:
+        print(f"  {e['name']} ({e['pinyin']}) - 组成: {e['ingredients'][:40] if e['ingredients'] else 'N/A'}...")
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--test", action="store_true", help="可行性测试（只跑 10 轮）")
-    args = parser.parse_args()
-    test() if args.test else main()
-
+    main()

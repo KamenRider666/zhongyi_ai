@@ -1,172 +1,235 @@
-"""解析 中医临床诊疗术语疾病 → diseases.jsonl
+"""解析 中医临床诊疗术语疾病.txt → diseases.jsonl
 
-用法: uv run python src/graphrag/parsers/parse_diseases.py --test
-   或: uv run python src/graphrag/parsers/parse_diseases.py
+纯程序解析，不使用 LLM（文件结构规整，可确定性解析）。
+
+文件结构:
+  - 文件头：前言/说明（跳过）
+  - 节标题：如 "3外感病类术语"（代码+名称同行，代码为单个数字）
+  - 词条：代码独占一行（如 3.1、3.1.1.1），后续行为名称、别名、定义、注释
+
+parent_code 推导（去掉最后一段 .x）:
+  3.1.1.1 → 3.1.1
+  3.1.1   → 3.1
+  3.1     → 3
+  3       → null
+
+用法:
+    uv run python -m src.graphrag.parsers.parse_diseases
 """
 
 import json
+import re
+from pathlib import Path
 
-from ..llm_parser_utils import call_llm
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-# ============================================================
-# Step 1: 分析前 100 行，确定实例最大尺寸
-# ============================================================
+DATA_FILE = _PROJECT_ROOT / "src" / "graphrag" / "data" / "中医临床诊疗术语疾病.txt"
+OUTPUT_FILE = _PROJECT_ROOT / "data" / "diseases.jsonl"
 
-DATA_FILE = "/src/graphrag/data/中医临床诊疗术语疾病.txt"
-OUTPUT_FILE = "/src/graphrag/data/diseases.jsonl"
-
-with open(DATA_FILE, encoding="utf-8") as f:
-    full_text = f.read()
-lines = full_text.split("\n")
-
-print(f"文件总大小: {len(full_text)} 字符, {len(lines)} 行")
-print(f"前 100 行预览 (用于确定实例最大尺寸):")
-print("=" * 60)
-for i, line in enumerate(lines[:100], 1):
-    print(f"L{i:4d}: {line[:120]}")
-print("=" * 60)
-
-# 分析: 一个疾病条目约 3~15 行, 每行 ~60 字符, 最大约 800 字符
-MAX_INSTANCE_CHARS = 800
-CHUNK_SIZE = int(MAX_INSTANCE_CHARS * 2.2)  # 1760
-
-# ============================================================
-# Step 2: 定义 JSON 模板
-# ============================================================
-
-DISEASE_TEMPLATE = {
-    "code": "编号如 3.1.1.1",
-    "name": "疾病名称",
-    "aliases": ["别名1", "别名2"],
-    "definition": "完整定义/描述文本",
-    "is_category": False,  # 是否只是类目词（如"泛指...一类外感病"）
-    "parent_code": "父级编号（如 3.1.1 → 3.1），若无则 null",
-}
-
-# ============================================================
-# Step 3: LLM 解析函数
-# ============================================================
-
-def parse_first_disease(chunk: str) -> tuple[dict | None, int]:
-    """用 LLM 从 chunk 中提取第一个疾病条目"""
-    schema_str = json.dumps(DISEASE_TEMPLATE, ensure_ascii=False, indent=2)
-
-    system = (
-        "你是一个精确的中医疾病术语文本解析器。从一段包含多个疾病条目的文本中，"
-        "精确找到「第一个完整的疾病条目」，提取为指定 JSON 格式。\n\n"
-        "识别规则：\n"
-        "1. 文本格式：首先是文件前言（前几行），然后是编号条目。\n"
-        "2. 每个条目以编号开头（如 \"3.1\\n\"），然后是一行或多行名称，然后是定义文本。\n"
-        "3. 如果名称后面有 \"注：...\" 则是注解，应包含在 definition 中但不要作为新条目。\n"
-        "4. 有些是纯类目词（如\"泛指...一类...\"）, 标记 is_category=true。\n"
-        "5. 别名从名称行后的行提取（编号行之后、定义行之前）。\n"
-        "6. 层级关系从编号推导：3.1.1 的 parent 是 3.1, 3.1 的 parent 是 null。\n\n"
-        "输出格式：\n"
-        "第一行: CUTOFF:N （N 是该条目在原文中的截止字符位置，从 0 起算）\n"
-        "第二行起: 完整的 JSON, 严格按模板字段填写。"
-    )
-
-    user = (
-        f"请从以下文本中提取第一个完整的疾病条目：\n\n"
-        f"=== 文本开始 ===\n```\n{chunk}\n```\n=== 文本结束 ===\n\n"
-        f"JSON 模板：\n```json\n{schema_str}\n```\n\n"
-        f"记住：第一行必须是 CUTOFF:N, 第二行起是 JSON。"
-    )
-
-    print(f"  请求 LLM (chunk={len(chunk)} chars)...", end=" ", flush=True)
-    raw = call_llm(system, user)
-    print(f"响应={len(raw)} chars")
-
-    header, _, body = raw.strip().partition("\n")
-    cutoff = 0
-    if header.startswith("CUTOFF:"):
-        try:
-            cutoff = int(header.split(":", 1)[1].strip())
-        except ValueError:
-            print(f"  警告: CUTOFF 解析失败: {header}")
-
-    body = body.strip()
-    if body.startswith("```"):
-        body = body.split("\n", 1)[-1] if "\n" in body else ""
-    if body.endswith("```"):
-        body = body.rsplit("```", 1)[0]
-    body = body.strip()
-
-    parsed = None
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError as e:
-        print(f"  JSON 解析失败: {e}")
-        print(f"  原始内容前 200 字符: {body[:200]}")
-
-    return parsed, cutoff
+# 代码行正则：纯数字+点，如 3.1、3.1.1.1、14.1
+CODE_LINE_RE = re.compile(r"^(\d+(?:\.\d+)+)$")
+# 节标题正则：单个数字开头紧跟中文，如 3外感病类术语
+SECTION_RE = re.compile(r"^(\d)([^\d.].+)$")
+# 行尾代码：如 "...为特征的痹病。9.6.12"
+TRAILING_CODE_RE = re.compile(r"^(.+?。)(\d+(?:\.\d+)+)$")
+# 注释行
+NOTE_RE = re.compile(r"^(.+?)?注[：:]")
 
 
-# ============================================================
-# Step 4: 核心循环（test 和 main 共用）
-# ============================================================
-
-def _run(max_rounds: int | None = None):
-    """核心解析循环。max_rounds=None 表示跑完全部。"""
-    mode = "测试" if max_rounds else "正式"
-    output_file = OUTPUT_FILE if max_rounds is None else (
-        SRC_DIR.parent / "data" / "diseases_test.jsonl"
-    )
-    print(f"\n=== [{mode}模式] 最多 {max_rounds or '不限'} 轮 ===")
-    print(f"配置: MAX_INSTANCE={MAX_INSTANCE_CHARS} chars, CHUNK_SIZE={CHUNK_SIZE} chars")
-    print(f"输入: {DATA_FILE}")
-    print(f"输出: {output_file}")
-    print("=" * 60)
-
-    text = full_text
-    text = text.split("\n", 2)[-1] if text.startswith("中医临床诊疗术语") else text
-
-    count = 0
-    total_chars = len(text)
-
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_file, "w", encoding="utf-8") as f_out:
-        while text.strip():
-            if max_rounds and count >= max_rounds:
-                print(f"\n  达到 {max_rounds} 轮上限, 停止。")
-                break
-
-            chunk = text[:CHUNK_SIZE]
-
-            parsed, cutoff = parse_first_disease(chunk)
-
-            if parsed and cutoff > 0:
-                f_out.write(json.dumps(parsed, ensure_ascii=False) + "\n")
-                count += 1
-                text = text[cutoff:]
-                progress = 100 * (1 - len(text) / total_chars)
-                name = parsed.get("name", "?")
-                code = parsed.get("code", "?")
-                print(f"  [{count}] {code} {name} | cutoff={cutoff} | 剩余={len(text)} chars | 进度={progress:.1f}%")
-            else:
-                skip = min(200, len(text))
-                print(f"  无法解析, 跳过 {skip} chars")
-                text = text[skip:]
-
-    print(f"\n{'=' * 60}")
-    print(f"完成! 共解析 {count} 条疾病, 输出到 {output_file}")
+def _derive_parent_code(code: str) -> str | None:
+    """从代码推导父级代码：3.1.1 → 3.1，3.1 → 3，3 → null"""
+    if "." not in code:
+        return None
+    return code.rsplit(".", 1)[0]
 
 
-def test():
-    """可行性测试：只解析前 10 个实例"""
-    _run(max_rounds=10)
+def _is_alias(line: str) -> bool:
+    """判断一行是否为别名（短、无句号、不像定义）"""
+    line = line.strip()
+    if not line or len(line) > 15:
+        return False
+    if "。" in line or "临床" in line or "注：" in line or "注:" in line:
+        return False
+    if line.startswith(("因", "泛指", "指", "本", "临床", "多", "常", "可", "是", "由", "为", "以", "属", "类")):
+        return False
+    return True
+
+
+def _is_definition(line: str) -> bool:
+    """判断一行是否为定义"""
+    line = line.strip()
+    if not line:
+        return False
+    if line.startswith(("注：", "注:")):
+        return False
+    if "。" in line or len(line) > 20:
+        return True
+    if line.startswith(("因", "泛指", "指", "本", "临床", "多", "常", "可", "是", "由", "为", "以", "属", "类")):
+        return True
+    return False
+
+
+def parse() -> list[dict]:
+    """解析整个文件，返回词条列表"""
+    with open(DATA_FILE, encoding="utf-8") as f:
+        raw_lines = f.readlines()
+
+    # 预处理：找到第一个节标题，跳过文件头
+    start_idx = 0
+    for i, line in enumerate(raw_lines):
+        if SECTION_RE.match(line.strip()):
+            start_idx = i
+            break
+
+    lines = [l.rstrip("\n").strip() for l in raw_lines[start_idx:]]
+
+    # 进一步预处理：拆分行尾带代码的行
+    # 如 "...为特征的痹病。9.6.12" → ["...为特征的痹病。", "9.6.12"]
+    processed: list[str] = []
+    for line in lines:
+        if not line:
+            continue
+        m = TRAILING_CODE_RE.match(line)
+        if m and not CODE_LINE_RE.match(line) and not SECTION_RE.match(line):
+            processed.append(m.group(1))
+            processed.append(m.group(2))
+        else:
+            processed.append(line)
+
+    # 解析词条
+    entries: list[dict] = []
+    i = 0
+    while i < len(processed):
+        line = processed[i]
+
+        # 节标题：如 "3外感病类术语"
+        m = SECTION_RE.match(line)
+        if m:
+            code = m.group(1)
+            name = m.group(2).strip()
+            entries.append({
+                "code": code,
+                "name": name,
+                "aliases": [],
+                "definition": "",
+                "is_category": True,  # 先标记，后面根据子节点修正
+                "parent_code": _derive_parent_code(code),
+            })
+            i += 1
+            continue
+
+        # 代码行：如 "3.1.1"
+        m = CODE_LINE_RE.match(line)
+        if m:
+            code = m.group(1)
+            i += 1
+
+            # 收集该词条的所有内容行
+            content_lines: list[str] = []
+            while i < len(processed):
+                next_line = processed[i]
+                if CODE_LINE_RE.match(next_line) or SECTION_RE.match(next_line):
+                    break
+                if next_line:
+                    content_lines.append(next_line)
+                i += 1
+
+            # 解析内容行：第一行是名称，后续是别名/定义/注释
+            name = ""
+            aliases: list[str] = []
+            definition = ""
+            notes: list[str] = []
+
+            if content_lines:
+                name = content_lines[0].rstrip(",，")
+
+                for cl in content_lines[1:]:
+                    # 拆分嵌入的注释（如 "...一类外感病。注：包括..."）
+                    note_m = NOTE_RE.match(cl)
+                    if note_m:
+                        if note_m.group(1):
+                            # 注释前有定义内容
+                            def_part = note_m.group(1).strip()
+                            if def_part and not definition:
+                                definition = def_part
+                            elif def_part:
+                                definition += def_part
+                        note_text = cl[cl.index("注"):].strip()
+                        notes.append(note_text)
+                    elif cl.startswith(("注：", "注:")):
+                        notes.append(cl)
+                    elif _is_definition(cl):
+                        if definition:
+                            definition += cl
+                        else:
+                            definition = cl
+                    elif _is_alias(cl):
+                        aliases.append(cl.rstrip(",，"))
+                    else:
+                        # 兜底：当作定义的一部分
+                        if definition:
+                            definition += cl
+                        else:
+                            definition = cl
+
+            entries.append({
+                "code": code,
+                "name": name,
+                "aliases": aliases,
+                "definition": definition,
+                "is_category": False,  # 先标记 false，后面根据子节点修正
+                "parent_code": _derive_parent_code(code),
+            })
+            continue
+
+        i += 1
+
+    # 修正 is_category：有子节点的标记为 True
+    codes_with_children = set()
+    for e in entries:
+        pc = e["parent_code"]
+        if pc:
+            codes_with_children.add(pc)
+    for e in entries:
+        if e["code"] in codes_with_children:
+            e["is_category"] = True
+
+    return entries
 
 
 def main():
-    """正式运行：解析全部"""
-    _run(max_rounds=None)
+    output_file = OUTPUT_FILE
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"输入: {DATA_FILE}")
+    print(f"输出: {output_file}")
+
+    entries = parse()
+    print(f"\n解析完成: 共 {len(entries)} 条")
+
+    # 统计
+    categories = sum(1 for e in entries if e["is_category"])
+    with_aliases = sum(1 for e in entries if e["aliases"])
+    with_definition = sum(1 for e in entries if e["definition"])
+    print(f"  分类节点: {categories}")
+    print(f"  有别名: {with_aliases}")
+    print(f"  有定义: {with_definition}")
+
+    # 层级统计
+    max_depth = max(e["code"].count(".") for e in entries)
+    print(f"  最大层级深度: {max_depth + 1}")
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+    print(f"\n输出到: {output_file}")
+
+    # 抽查前 5 条
+    print("\n前 5 条预览:")
+    for e in entries[:5]:
+        print(f"  {e['code']} {e['name']} (parent={e['parent_code']}, category={e['is_category']})")
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--test", action="store_true", help="可行性测试（只跑 10 轮）")
-    args = parser.parse_args()
-    test() if args.test else main()
-
+    main()
