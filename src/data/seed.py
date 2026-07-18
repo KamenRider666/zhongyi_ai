@@ -1,10 +1,12 @@
 """种子数据初始化 - 将示例数据写入数据库（MySQL / SQLite）"""
 
 import sys
-import io
 
-# 修复 Windows GBK 编码问题
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+# 修复 Windows GBK 编码问题（reconfigure 幂等，避免重复包装导致底层 buffer 被关闭）
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 from src.data.database import TCMDatabase
 

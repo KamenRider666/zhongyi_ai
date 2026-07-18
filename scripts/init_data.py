@@ -65,6 +65,26 @@ def step_mysql():
     init_all()
 
 
+def step_seed_aux():
+    """初始化穴位、体质表数据（acupoint/constitution）
+
+    这两张表由 TCMDatabase 管理，供图谱 Acupoint/Constitution 节点
+    及 search_acupoint/search_constitution 工具使用。幂等（INSERT IGNORE）。
+    """
+    print("\n" + "=" * 60)
+    print("[2.5/4] 初始化穴位、体质表数据")
+    print("=" * 60)
+
+    from src.data.database import TCMDatabase
+    from src.data.seed import init_acupoint_data, init_constitution_data
+
+    db = TCMDatabase()
+    db.init_db()  # 确保表结构存在
+    init_acupoint_data(db)
+    init_constitution_data(db)
+    print("✓ 穴位、体质表数据就绪")
+
+
 def step_graph():
     """③ MySQL → Neo4j"""
     print("\n" + "=" * 60)
@@ -131,6 +151,8 @@ def main():
         step_mysql()
     else:
         print("[2/4] 跳过 MySQL 导入")
+
+    step_seed_aux()
 
     if not args.skip_graph:
         step_graph()

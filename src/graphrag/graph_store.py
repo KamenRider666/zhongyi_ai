@@ -104,6 +104,8 @@ class Neo4jGraphStore:
             "CREATE CONSTRAINT IF NOT EXISTS FOR (cat:Category) REQUIRE cat.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (nat:Nature) REQUIRE nat.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (t:Therapy) REQUIRE t.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (a:Acupoint) REQUIRE a.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Constitution) REQUIRE c.name IS UNIQUE",
         ]
         for constraint in constraints:
             self.execute_write(constraint)

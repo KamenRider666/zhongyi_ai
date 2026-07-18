@@ -138,8 +138,8 @@ class GraphRetriever:
             """
             MATCH (f:Formula)-[:TREATS]->(s:Symptom)
             WHERE s.name CONTAINS $symptom
-            RETURN f.name AS formula_name, f.efficacy AS efficacy,
-                   f.composition AS composition, f.indications AS indications,
+            RETURN f.name AS formula_name, f.functions AS efficacy,
+                   f.ingredients AS composition, f.clinical_use AS indications,
                    f.contraindications AS contraindications
             LIMIT 5
             """,
@@ -167,7 +167,7 @@ class GraphRetriever:
             RETURN h.name AS herb_name, h.efficacy AS efficacy,
                    h.nature AS nature, h.taste AS taste,
                    h.meridian AS meridian, h.dosage AS dosage,
-                   h.toxicity AS toxicity
+                   h.caution AS caution
             LIMIT 5
             """,
             {"symptom": symptom},
@@ -184,7 +184,7 @@ class GraphRetriever:
                     "taste": r["taste"],
                     "meridian": r["meridian"],
                     "dosage": r.get("dosage", ""),
-                    "toxicity": r.get("toxicity", "无毒"),
+                    "caution": r.get("caution", ""),
                 },
             })
 

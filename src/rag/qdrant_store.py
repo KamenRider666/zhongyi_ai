@@ -161,6 +161,45 @@ class QdrantStore:
             )
         return hits
 
+    def scroll_all(self, batch_size: int = 500) -> List[dict]:
+        """滚动加载集合中全部文档的 payload（用于构建 BM25 索引）
+
+        Args:
+            batch_size: 每次滚动批量大小
+
+        Returns:
+            全部文档列表，每个文档包含 content/source/category 等 payload 字段
+        """
+        if self.client is None:
+            self.connect()
+        if not self.client.collection_exists(self.collection_name):
+            return []
+
+        all_docs: List[dict] = []
+        offset = None
+
+        while True:
+            results, offset = self.client.scroll(
+                collection_name=self.collection_name,
+                limit=batch_size,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in results:
+                payload = point.payload or {}
+                all_docs.append({
+                    "content": payload.get("content", ""),
+                    "source": payload.get("source", ""),
+                    "category": payload.get("category", ""),
+                    **{k: v for k, v in payload.items()
+                       if k not in ("content", "source", "category")},
+                })
+            if offset is None:
+                break
+
+        return all_docs
+
     def delete_collection(self) -> None:
         """删除集合"""
         if self.client is None:

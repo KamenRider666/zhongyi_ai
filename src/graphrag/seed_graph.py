@@ -1,11 +1,19 @@
-"""知识图谱种子数据初始化 - 从 MySQL 构建 Neo4j 知识图谱
+"""知识图谱构建 - 从 MySQL 构建 Neo4j 知识图谱
 
-适配 seedmysql.py 导入的 4 张新表:
-  - formulas / herbs / diseases / syndromes
+数据源：MySQL agenttest 库 14 张表（4 项目表 + 10 诊疗词典表）
+构建器：TCMGraphBuilder（批量 UNWIND 写入）
+
+用法:
+    # 直接构建（MERGE 更新，不清空旧数据）
+    uv run python -m src.graphrag.seed_graph
+
+    # 先清空旧图谱再构建（推荐，干净重建）
+    uv run python -m src.graphrag.seed_graph --reset
 """
 
 import sys
 import io
+import argparse
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
@@ -14,37 +22,44 @@ from src.graphrag.graph_store import Neo4jGraphStore
 from src.graphrag.graph_builder import TCMGraphBuilder
 
 
-def init_graph_data(
-    neo4j_uri: str = "bolt://localhost:7687",
-    neo4j_user: str = "neo4j",
-    neo4j_password: str = "zhongyi_neo4j_2026",
-) -> None:
+def init_graph_data(reset: bool = False) -> None:
     print("连接 Neo4j...")
     graph_store = Neo4jGraphStore(
-        uri=neo4j_uri,
-        user=neo4j_user,
-        password=neo4j_password,
+        uri=settings.NEO4J_URI,
+        user=settings.NEO4J_USER,
+        password=settings.NEO4J_PASSWORD,
     )
     graph_store.connect()
-    print("Neo4j 连接成功")
+    print(f"Neo4j 连接成功: {settings.NEO4J_URI}")
+    print(f"MySQL 源: {settings.MYSQL_HOST}:{settings.MYSQL_PORT}/{settings.MYSQL_DATABASE}")
 
-    print(f"目标库: {settings.MYSQL_USER}@{settings.MYSQL_HOST}:{settings.MYSQL_PORT}/{settings.MYSQL_DATABASE}")
+    # 清空旧数据
+    if reset:
+        print("\n⚠️  清空已有图谱数据...")
+        graph_store.clear_graph()
 
+    # 构建
     builder = TCMGraphBuilder(graph_store)
-    builder.build_full_graph()
+    try:
+        builder.build_full_graph()
+    finally:
+        builder.close()
 
+    # 统计
     stats = graph_store.get_stats()
-    print(f"\n知识图谱初始化完成:")
-    print(f"  - 节点数: {stats['nodes']}")
-    print(f"  - 关系数: {stats['relationships']}")
+    print(f"\n知识图谱构建完成:")
+    print(f"  节点数: {stats['nodes']}")
+    print(f"  关系数: {stats['relationships']}")
 
-    builder.close()
     graph_store.close()
 
 
 if __name__ == "__main__":
-    init_graph_data(
-        neo4j_uri=settings.NEO4J_URI,
-        neo4j_user=settings.NEO4J_USER,
-        neo4j_password=settings.NEO4J_PASSWORD,
+    parser = argparse.ArgumentParser(description="从 MySQL 构建 Neo4j 知识图谱")
+    parser.add_argument(
+        "--reset", action="store_true",
+        help="先清空已有图谱数据再构建（干净重建）",
     )
+    args = parser.parse_args()
+
+    init_graph_data(reset=args.reset)

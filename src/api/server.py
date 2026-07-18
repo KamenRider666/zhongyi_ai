@@ -53,6 +53,17 @@ async def lifespan(app: FastAPI):
     checkpointer = InMemorySaver()
     agent_executor = create_tcm_agent(llm=llm, tools=tools, checkpointer=checkpointer)
 
+    # 预热 BM25 索引（混合检索），失败不影响启动
+    try:
+        from src.tools.rag_tool import get_bm25_store
+        bm25 = get_bm25_store()
+        if bm25:
+            print(f"✓ 混合检索 (BM25+Dense): {bm25.doc_count} 篇文档已索引")
+        else:
+            print("○ 混合检索降级: 纯稠密向量检索 (BM25 未就绪)")
+    except Exception as e:
+        print(f"○ BM25 预热跳过: {e}")
+
     print(f"✓ 模型: {settings.QWEN_MODEL}")
     print(f"✓ 工具: {[t.name for t in tools]}")
     print(f"✓ 多轮对话记忆: 已启用 (InMemorySaver)")

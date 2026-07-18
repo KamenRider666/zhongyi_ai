@@ -92,6 +92,8 @@ class TCMGraphBuilder:
         self._create_symptom_nodes()
         self._create_meridian_nodes()
         self._create_category_nodes()
+        self._create_acupoint_nodes()
+        self._create_constitution_nodes()
 
         if self._has_diag_tables:
             self._enrich_disease_from_diag()
@@ -109,6 +111,7 @@ class TCMGraphBuilder:
         self._create_disease_symptom_relations()
         self._create_syndrome_symptom_relations()
         self._create_formula_disease_relations()
+        self._create_formula_herb_relations()
 
         if self._has_diag_tables:
             self._create_symptom_comparison_relations()
@@ -147,6 +150,7 @@ class TCMGraphBuilder:
             items.append({
                 "name": r["name"], "pinyin": r.get("pinyin", ""),
                 "latin_name": r.get("latin_name", ""), "nature": nature, "taste": taste,
+                "meridian": meridian,
                 "efficacy": r.get("functions", ""), "dosage": r.get("usage", ""),
                 "caution": r.get("caution", ""),
             })
@@ -158,7 +162,7 @@ class TCMGraphBuilder:
             UNWIND $batch AS row
             MERGE (h:Herb {name: row.name})
             SET h.pinyin = row.pinyin, h.latin_name = row.latin_name,
-                h.nature = row.nature, h.taste = row.taste,
+                h.nature = row.nature, h.taste = row.taste, h.meridian = row.meridian,
                 h.efficacy = row.efficacy, h.dosage = row.dosage, h.caution = row.caution
         """, items, "Herb 节点")
         # 批量建归经关系
@@ -268,6 +272,83 @@ class TCMGraphBuilder:
         items = [{"name": r["category"].strip()} for r in rows if r["category"].strip()]
         self._batch_write("UNWIND $batch AS row MERGE (cat:Category {name: row.name})",
                           items, "Category 节点")
+
+    def _create_acupoint_nodes(self) -> None:
+        """创建穴位节点（若 acupoint 表存在）
+
+        同时从 indications 抽取症状建 Acupoint-[:TREATS]->Symptom 关系，
+        让 retriever 的"症状→穴位"推理路径能跑通。
+        """
+        try:
+            rows = self._query(
+                "SELECT name, pinyin, meridian, location, method, efficacy, "
+                "indications, technique FROM acupoint "
+                "WHERE name IS NOT NULL AND name != ''"
+            )
+        except Exception:
+            print("  [INFO] acupoint 表不存在，跳过穴位节点")
+            return
+        if not rows:
+            print("  ✓ Acupoint 节点: 0")
+            return
+        items = [{
+            "name": r["name"], "pinyin": r.get("pinyin", ""),
+            "meridian": r.get("meridian", ""), "location": r.get("location", ""),
+            "method": r.get("method", ""), "efficacy": r.get("efficacy", ""),
+            "indications": r.get("indications", ""), "technique": r.get("technique", ""),
+        } for r in rows]
+        self._batch_write("""
+            UNWIND $batch AS row
+            MERGE (a:Acupoint {name: row.name})
+            SET a.pinyin = row.pinyin, a.meridian = row.meridian, a.location = row.location,
+                a.method = row.method, a.efficacy = row.efficacy,
+                a.indications = row.indications, a.technique = row.technique
+        """, items, "Acupoint 节点")
+        # 穴位→症状（从 indications 抽取）
+        pairs = []
+        for r in rows:
+            for s in self._extract_symptoms(r.get("indications", "")):
+                pairs.append({"acupoint": r["name"], "symptom": s})
+        self._batch_write("""
+            UNWIND $batch AS row
+            MATCH (a:Acupoint {name: row.acupoint})
+            MERGE (s:Symptom {name: row.symptom})
+            MERGE (a)-[:TREATS]->(s)
+        """, pairs, "Acupoint → Symptom")
+
+    def _create_constitution_nodes(self) -> None:
+        """创建体质节点（若 constitution 表存在）
+
+        节点用 name(=type_name) 作唯一键，同时设 type 属性以兼容 retriever 查询。
+        """
+        try:
+            rows = self._query(
+                "SELECT type_name, characteristics, tendency, regulation, diet_advice, "
+                "exercise_advice, acupoint_advice FROM constitution "
+                "WHERE type_name IS NOT NULL AND type_name != ''"
+            )
+        except Exception:
+            print("  [INFO] constitution 表不存在，跳过体质节点")
+            return
+        if not rows:
+            print("  ✓ Constitution 节点: 0")
+            return
+        items = [{
+            "name": r["type_name"], "type": r["type_name"],
+            "characteristics": r.get("characteristics", ""),
+            "tendency": r.get("tendency", ""), "regulation": r.get("regulation", ""),
+            "diet_advice": r.get("diet_advice", ""),
+            "exercise_advice": r.get("exercise_advice", ""),
+            "acupoint_advice": r.get("acupoint_advice", ""),
+        } for r in rows]
+        self._batch_write("""
+            UNWIND $batch AS row
+            MERGE (c:Constitution {name: row.name})
+            SET c.type = row.type, c.characteristics = row.characteristics,
+                c.tendency = row.tendency, c.regulation = row.regulation,
+                c.diet_advice = row.diet_advice, c.exercise_advice = row.exercise_advice,
+                c.acupoint_advice = row.acupoint_advice
+        """, items, "Constitution 节点")
 
     # ═══════════════════════════════════════
     #  节点丰富 — 诊疗词典
@@ -484,6 +565,22 @@ class TCMGraphBuilder:
             MERGE (f)-[:TREATS]->(d)
         """, pairs, "Formula → Disease")
 
+    def _create_formula_herb_relations(self) -> None:
+        """方剂→药材（CONTAINS）：解析 ingredients 成分名，匹配 herbs 表"""
+        rows = self._query("SELECT name, ingredients FROM formulas")
+        herb_names = {h["name"] for h in self._query("SELECT name FROM herbs")}
+        pairs = []
+        for r in rows:
+            for herb_name in self._parse_ingredients(r.get("ingredients", "")):
+                if herb_name in herb_names:
+                    pairs.append({"formula": r["name"], "herb": herb_name})
+        self._batch_write("""
+            UNWIND $batch AS row
+            MATCH (f:Formula {name: row.formula})
+            MATCH (h:Herb {name: row.herb})
+            MERGE (f)-[:CONTAINS]->(h)
+        """, pairs, "Formula → Herb (CONTAINS)")
+
     # ═══════════════════════════════════════
     #  关系创建 — 诊疗词典（已批量）
     # ═══════════════════════════════════════
@@ -545,6 +642,17 @@ class TCMGraphBuilder:
 
     def _split_nature(self, text: str) -> List[str]:
         return [i.strip() for i in re.split(r"[，,、]", text) if i.strip()]
+
+    def _parse_ingredients(self, text: str) -> List[str]:
+        """解析方剂组成为药材名列表
+
+        去除括号炮制后缀（如"苦杏仁(炒)"→"苦杏仁"）、去句号、按顿号/逗号分割。
+        """
+        if not text:
+            return []
+        text = re.sub(r"[（(].*?[)）]", "", text)
+        text = text.replace("。", "")
+        return [i.strip() for i in re.split(r"[、，,]", text) if i.strip()]
 
     def _extract_symptoms(self, text: str) -> List[str]:
         """从文本中提取症状关键词

@@ -331,6 +331,9 @@ function doLogout() {
   token = ''; username = '';
   currentSessionId = ''; activeSession = null;
   chats = {};
+  localStorage.removeItem('tcm_token');
+  localStorage.removeItem('tcm_username');
+  localStorage.removeItem('tcm_chats');
   document.getElementById('app-view').classList.remove('active');
   document.getElementById('auth-view').style.display = '';
   document.getElementById('login-user').value = '';
@@ -351,6 +354,7 @@ function newChat() {
   activeSession = currentSessionId;
   renderSessions();
   renderMessages();
+  saveState();
 }
 
 function switchChat(sid) {
@@ -552,6 +556,7 @@ async function sendMessage() {
     isStreaming = false;
     document.getElementById('send-btn').disabled = false;
     document.getElementById('msg-input').focus();
+    saveState();
   }
 }
 
